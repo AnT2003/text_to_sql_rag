@@ -267,10 +267,21 @@ def chat():
 [YÊU CẦU]:
 Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 
-[QUY TẮC QUAN TRỌNG]:
-1. **Logic Mapping:** Đọc kỹ routine definition nếu có để map ID với string (CASE WHEN).
-2. **Kỹ thuật BigQuery:** Dùng JOIN, GROUP BY chuẩn BigQuery. Không bịa đặt tên cột không có trong context.
+[QUY TẮC QUAN TRỌNG - BẮT BUỘC TUÂN THỦ]:
+1. **Logic Mapping (QUAN TRỌNG NHẤT):**
+   - Hãy tự đọc phần `[ROUTINE / FUNCTION]` ở trên.
+   - Tìm các mệnh đề `CASE WHEN` bên trong code SQL của routine để hiểu ý nghĩa các con số (ID).
+   - Ví dụ: Nếu thấy `WHEN status_id = 2 THEN 'New'`, và user hỏi về 'New', bạn PHẢI dùng `status_id = 2`.
+   - KHÔNG ĐƯỢC ĐOÁN MÒ. Nếu routine định nghĩa khác, hãy theo routine.
+
+2. **Kỹ thuật BigQuery:**
+   - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
+   - ✅ Dùng JOIN (LEFT JOIN) kết hợp GROUP BY nếu cần.
+   - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
+
 3. Chỉ trả về code SQL trong ```sql ... ```.
+
+4. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
@@ -309,3 +320,4 @@ def reload_schema():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
