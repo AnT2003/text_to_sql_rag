@@ -9,41 +9,47 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
 
-# --- IMPORT THƯ VIỆN RAG NÂNG CAO ---
+# --- 1. SETUP MÔI TRƯỜNG ---
+# Tắt cảnh báo token của HuggingFace
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+
+# --- 2. IMPORT THƯ VIỆN RAG ---
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever
 
-# --- 1. SETUP & CẤU HÌNH ---
 load_dotenv()
 app = Flask(__name__)
-CORS(app)
+CORS(app) # Bật CORS để tránh lỗi kết nối từ Frontend
 
+# --- 3. CẤU HÌNH ---
 SCHEMA_FOLDER = "./schemas"
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 
 # Cấu hình Database (Tự động thích ứng SQLite/Postgres)
+# Nếu chạy local: dùng sqlite:///chat_history.db
+# Nếu chạy Render: dùng biến môi trường DATABASE_URL
 db_url = os.getenv("DATABASE_URL", "sqlite:///chat_history.db")
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 db = SQLAlchemy(app)
 
-# BIẾN TOÀN CỤC (CACHE)
-# 1. Chứa toàn bộ Logic Routines (Luôn gửi cho AI)
+# --- BIẾN TOÀN CỤC (CACHE) ---
+# 1. Chứa toàn bộ Logic Routines (Luôn gửi cho AI để đảm bảo hiểu đúng giá trị)
 GLOBAL_ROUTINES_CONTEXT = "" 
-# 2. Bộ tìm kiếm Bảng (Chỉ tìm bảng liên quan)
-ENSEMBLE_RETRIEVER = None
+# 2. Các bộ tìm kiếm Bảng (Lưu riêng lẻ để xử lý thủ công)
+VECTOR_RETRIEVER = None
+BM25_RETRIEVER = None
 
 # =========================================================
-#  PHẦN 2: QUẢN LÝ DATABASE (LƯU LỊCH SỬ)
+#  PHẦN 4: QUẢN LÝ DATABASE (LƯU LỊCH SỬ CHAT)
 # =========================================================
 class Session(db.Model):
     __tablename__ = 'sessions'
@@ -69,36 +75,47 @@ def save_message(session_id, role, content):
         new_msg = Message(session_id=session_id, role=role, content=content)
         db.session.add(new_msg)
         db.session.commit()
-    except: db.session.rollback()
+    except Exception as e:
+        print(f"Error saving message: {e}")
+        db.session.rollback()
 
 def create_session_if_not_exists(session_id, first_msg):
     try:
         session = Session.query.get(session_id)
         if not session:
+            # Lấy 50 ký tự đầu làm tiêu đề
             title = (first_msg[:50] + '...') if len(first_msg) > 50 else first_msg
             db.session.add(Session(id=session_id, title=title))
             db.session.commit()
-    except: db.session.rollback()
+    except Exception as e:
+        print(f"Error creating session: {e}")
+        db.session.rollback()
 
 def get_chat_history_formatted(session_id, limit=10):
-    msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
-    history = []
-    for m in msgs[::-1]: history.append({"role": m.role, "content": m.content})
-    return history
+    try:
+        msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
+        history = []
+        for m in msgs[::-1]: # Đảo ngược thành cũ -> mới
+            history.append({"role": m.role, "content": m.content})
+        return history
+    except:
+        return []
 
 # =========================================================
-#  PHẦN 3: ADVANCED RAG INITIALIZATION
+#  PHẦN 5: ADVANCED RAG INITIALIZATION
 # =========================================================
 def init_advanced_rag():
     """
     Khởi tạo hệ thống RAG phân tầng:
-    1. Routines: Nạp Full vào biến toàn cục (High Priority).
-    2. Tables: Index vào Vector Store & BM25 (Retrieval Priority).
+    1. Routines: Nạp Full vào biến toàn cục GLOBAL_ROUTINES_CONTEXT (Ưu tiên cao nhất).
+    2. Tables: Index vào Vector Store & BM25 để tìm kiếm khi cần.
     """
-    global GLOBAL_ROUTINES_CONTEXT, ENSEMBLE_RETRIEVER
+    global GLOBAL_ROUTINES_CONTEXT, VECTOR_RETRIEVER, BM25_RETRIEVER
     print("🚀 Đang khởi tạo Advanced RAG System...")
 
-    if not os.path.exists(SCHEMA_FOLDER): return
+    if not os.path.exists(SCHEMA_FOLDER): 
+        print(f"⚠️ Không tìm thấy thư mục {SCHEMA_FOLDER}")
+        return
 
     json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
     
@@ -116,9 +133,12 @@ def init_advanced_rag():
                     # Logic: Hàm chứa quy tắc nghiệp vụ (CASE WHEN), AI cần thấy nó MỌI LÚC.
                     if 'routine_name' in item:
                         name = item.get('routine_name', 'Unknown')
+                        # Lấy definition hoặc ddl
                         definition = item.get('routine_definition') or item.get('ddl') or ''
-                        # Tạo đoạn văn bản mô tả routine
-                        r_text = f"FUNCTION: {name}\nLOGIC:\n```sql\n{definition}\n```"
+                        desc = item.get('description', '')
+                        
+                        # Tạo đoạn văn bản mô tả routine để nạp global
+                        r_text = f"FUNCTION NAME: {name}\nDESCRIPTION: {desc}\nLOGIC CODE:\n```sql\n{definition}\n```"
                         routine_texts.append(r_text)
 
                     # --- XỬ LÝ TABLE (Bảng Dữ liệu) ---
@@ -127,7 +147,7 @@ def init_advanced_rag():
                         name = item.get('table_name', 'Unknown')
                         desc = item.get('description', '')
                         cols = [f"{c['name']} ({c.get('type')})" for c in item.get('columns', [])]
-                        col_str = ", ".join(cols) # Gộp gọn để tiết kiệm token
+                        col_str = ", ".join(cols) # Gộp gọn
                         
                         # Nội dung để Index (Tìm kiếm)
                         page_content = f"TABLE: {name}\nDESC: {desc}\nCOLS: {col_str}\nFULL_SCHEMA: {json.dumps(item, ensure_ascii=False)}"
@@ -150,27 +170,31 @@ def init_advanced_rag():
         # Vector Search
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         vectorstore = FAISS.from_documents(table_docs, embeddings)
-        vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+        VECTOR_RETRIEVER = vectorstore.as_retriever(search_kwargs={"k": 5})
         
         # Keyword Search
-        bm25_retriever = BM25Retriever.from_documents(table_docs)
-        bm25_retriever.k = 5
+        BM25_RETRIEVER = BM25Retriever.from_documents(table_docs)
+        BM25_RETRIEVER.k = 5
         
-        # Ensemble (Kết hợp)
-        ENSEMBLE_RETRIEVER = EnsembleRetriever(
-            retrievers=[bm25_retriever, vector_retriever],
-            weights=[0.4, 0.6]
-        )
         print(f"✅ Table RAG sẵn sàng ({len(table_docs)} bảng).")
+    else:
+        print("⚠️ Không có bảng dữ liệu nào để Index.")
 
 def retrieve_tables(query):
-    """Tìm bảng liên quan bằng Hybrid Search"""
-    if not ENSEMBLE_RETRIEVER: return ""
-    docs = ENSEMBLE_RETRIEVER.invoke(query)
-    # Deduplicate (loại bỏ trùng)
+    """Tìm bảng liên quan bằng Hybrid Search (Manual Implementation)"""
+    if not VECTOR_RETRIEVER or not BM25_RETRIEVER: return ""
+    
+    # 1. Keyword Search (BM25) - Bắt từ khóa chính xác
+    docs_bm25 = BM25_RETRIEVER.invoke(query)
+    # 2. Vector Search (Semantic) - Bắt ý nghĩa tương đồng
+    docs_vector = VECTOR_RETRIEVER.invoke(query)
+    
+    # 3. Gộp kết quả và loại bỏ trùng lặp
     seen = set()
     unique_docs = []
-    for d in docs:
+    
+    # Ưu tiên BM25 trước rồi đến Vector
+    for d in docs_bm25 + docs_vector:
         if d.page_content not in seen:
             seen.add(d.page_content)
             unique_docs.append(d)
@@ -182,7 +206,7 @@ init_db()
 init_advanced_rag()
 
 # =========================================================
-#  PHẦN 4: API ROUTES & PROMPT ENGINEERING
+#  PHẦN 6: API ROUTES & PROMPT ENGINEERING
 # =========================================================
 
 @app.route('/')
@@ -221,24 +245,24 @@ def chat():
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
 
-        # 1. LẤY CONTEXT (Kỹ thuật Advanced: Global Logic + Retrieved Data)
-        # Luôn lấy toàn bộ Logic hàm
+        # 1. LẤY CONTEXT (Chiến lược: Global Logic + Retrieved Tables)
+        # Luôn lấy toàn bộ Logic hàm để đảm bảo hiểu CASE WHEN
         logic_context = GLOBAL_ROUTINES_CONTEXT
-        # Chỉ lấy Bảng liên quan
+        # Chỉ lấy các Bảng liên quan để tiết kiệm token
         data_context = retrieve_tables(user_msg)
 
         if not data_context:
-            data_context = "Không tìm thấy bảng nào khớp với câu hỏi. Hãy tự suy luận."
+            data_context = "Không tìm thấy bảng nào khớp với câu hỏi. Hãy tự suy luận dựa trên kiến thức SQL."
 
         # 2. XÂY DỰNG PROMPT CHUYÊN SÂU
         system_prompt = f"""Bạn là chuyên gia BigQuery SQL cao cấp.
 
 [CẤU TRÚC DỮ LIỆU ĐƯỢC CUNG CẤP]:
 ---
-[PHẦN 1: LOGIC NGHIỆP VỤ & MAPPING (BẮT BUỘC ĐỌC)]:
+[PHẦN 1: LOGIC NGHIỆP VỤ & MAPPING (BẮT BUỘC ĐỌC KỸ)]:
 {logic_context}
 ---
-[PHẦN 2: BẢNG DỮ LIỆU LIÊN QUAN (TRA CỨU)]:
+[PHẦN 2: BẢNG DỮ LIỆU LIÊN QUAN (TRA CỨU CẤU TRÚC)]:
 {data_context}
 ---
 
