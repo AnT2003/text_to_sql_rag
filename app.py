@@ -298,9 +298,15 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
    - ✅ Dùng JOIN (LEFT JOIN) kết hợp GROUP BY nếu cần.
    - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
 
-3. Chỉ trả về code SQL trong ```sql ... ```.
+3. Luôn phải tham khảo kỹ phần `[ROUTINE / FUNCTION]` để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn.
 
-4. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
+4. Luôn phải lấy đúng các bảng, trường dữ liệu đã được cung cấp trong ngữ cảnh ở các file schemas, không được tự bịa.
+
+[ĐỊNH DẠNG TRẢ VỀ]:
+
+1. Chỉ trả về code SQL trong ```sql ... ```.
+
+2. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
@@ -342,3 +348,4 @@ load_all_schemas()
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
