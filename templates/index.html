@@ -124,21 +124,29 @@
             const container = document.getElementById('sessionList');
             try {
                 const res = await fetch(`${API_BASE}/api/sessions`);
-                if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+                if (!res.ok) {
+                     // Nếu Server trả về lỗi (500), coi như vẫn kết nối được nhưng Server đang lỗi
+                     // Không switch sang offline mode ngay, để user thấy lỗi trong chat
+                     throw new Error(`Server Error: ${res.status}`);
+                }
                 
                 const sessions = await res.json();
                 updateConnectionStatus(true); // Kết nối thành công
                 renderSessionList(sessions);
             } catch (e) { 
-                console.warn("Server disconnected, switching to offline UI.", e);
-                updateConnectionStatus(false);
-                
-                // Hiển thị dữ liệu giả lập (Mock Data) để UI không bị trống
-                const mockSessions = [
-                    { id: 'mock-1', title: 'Phân tích doanh thu tháng 10 (Demo)' },
-                    { id: 'mock-2', title: 'Truy vấn khách hàng VIP (Demo)' }
-                ];
-                renderSessionList(mockSessions);
+                console.warn("Session load failed:", e);
+                // Chỉ switch sang offline nếu là lỗi mạng (Failed to fetch)
+                if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+                     updateConnectionStatus(false);
+                     const mockSessions = [
+                        { id: 'mock-1', title: 'Phân tích doanh thu tháng 10 (Demo)' },
+                        { id: 'mock-2', title: 'Truy vấn khách hàng VIP (Demo)' }
+                    ];
+                    renderSessionList(mockSessions);
+                } else {
+                    // Lỗi server 500 thì vẫn giữ status online nhưng báo lỗi
+                    container.innerHTML = `<div class="p-3 text-red-400 text-xs text-center">Lỗi Server: ${e.message}</div>`;
+                }
             }
         }
 
@@ -172,7 +180,7 @@
 
             try {
                 const res = await fetch(`${API_BASE}/api/history/${sessionId}`);
-                if (!res.ok) throw new Error('Không thể tải lịch sử');
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const messages = await res.json();
                 
                 const chatBox = document.getElementById('chatBox');
@@ -221,22 +229,42 @@
                     })
                 });
                 
-                if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+                // Cố gắng đọc JSON lỗi từ server nếu có
+                let data;
+                try {
+                    data = await res.json();
+                } catch (jsonErr) {
+                    // Nếu không phải JSON (VD: lỗi 500 từ Web Server trả HTML), tự tạo object lỗi
+                    data = { error: `Server Error ${res.status}: ${res.statusText}` };
+                }
 
-                const data = await res.json();
                 document.getElementById(loadingId).remove();
 
-                if (data.error) appendMessage('bot', '❌ Lỗi: ' + data.error);
-                else {
-                    appendMessage('bot', data.response);
-                    loadSessions(); 
+                if (!res.ok) {
+                    // Lỗi 4xx hoặc 5xx từ Server -> HIỂN THỊ LỖI, KHÔNG CHUYỂN SANG DEMO
+                    console.error("Server Error Response:", data);
+                    appendMessage('bot', `❌ **Lỗi Server (${res.status}):**\n\`${data.error || JSON.stringify(data)}\`\n\n_(Server vẫn kết nối nhưng gặp lỗi xử lý)_`);
+                } else {
+                    // Thành công 200
+                    if (data.error) {
+                         appendMessage('bot', '❌ Lỗi: ' + data.error);
+                    } else {
+                        appendMessage('bot', data.response);
+                        loadSessions(); 
+                    }
                 }
             } catch (e) {
+                // Chỉ khi lỗi mạng (Network Error / Failed to fetch) mới chuyển sang chế độ Demo
                 document.getElementById(loadingId).remove();
-                // Tự động chuyển sang chế độ offline nếu gọi API thất bại
-                updateConnectionStatus(false);
-                // Hiển thị lỗi cụ thể
-                appendMessage('bot', `❌ **Lỗi kết nối Server:**\n\n*Chi tiết lỗi:* \`${e}\`\n\nKhông thể gọi API. Vui lòng kiểm tra xem bạn đã chạy \`python app.py\` chưa.\n\n_Chuyển sang chế độ Demo..._`);
+                console.error("Network Error:", e);
+                
+                if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+                    updateConnectionStatus(false);
+                    appendMessage('bot', `❌ **Mất kết nối Server:**\nServer không phản hồi. Vui lòng kiểm tra terminal.\n\n_Chuyển sang chế độ Demo..._`);
+                } else {
+                    // Lỗi khác (Javascript error)
+                    appendMessage('bot', `❌ **Lỗi Client:**\n\`${e.message}\``);
+                }
             }
         }
 
