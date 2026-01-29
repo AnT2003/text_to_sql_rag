@@ -130,7 +130,7 @@
                 updateConnectionStatus(true); // Kết nối thành công
                 renderSessionList(sessions);
             } catch (e) { 
-                console.warn("Server disconnected, switching to offline UI.");
+                console.warn("Server disconnected, switching to offline UI.", e);
                 updateConnectionStatus(false);
                 
                 // Hiển thị dữ liệu giả lập (Mock Data) để UI không bị trống
@@ -188,7 +188,7 @@
 
             } catch(e) { 
                 console.error("Lỗi load history:", e);
-                document.getElementById('chatBox').innerHTML = '<div class="text-center text-red-500 mt-10">❌ Lỗi tải lịch sử chat.</div>';
+                document.getElementById('chatBox').innerHTML = `<div class="text-center text-red-500 mt-10">❌ Lỗi tải lịch sử chat: ${e.message}</div>`;
             }
         }
 
@@ -221,7 +221,7 @@
                     })
                 });
                 
-                if (!res.ok) throw new Error('Network response was not ok');
+                if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
 
                 const data = await res.json();
                 document.getElementById(loadingId).remove();
@@ -235,7 +235,8 @@
                 document.getElementById(loadingId).remove();
                 // Tự động chuyển sang chế độ offline nếu gọi API thất bại
                 updateConnectionStatus(false);
-                appendMessage('bot', `❌ **Lỗi kết nối Server:**\nKhông thể gọi API. Vui lòng kiểm tra xem bạn đã chạy \`python app.py\` chưa.\n\n_Chuyển sang chế độ Demo..._`);
+                // Hiển thị lỗi cụ thể
+                appendMessage('bot', `❌ **Lỗi kết nối Server:**\n\n*Chi tiết lỗi:* \`${e}\`\n\nKhông thể gọi API. Vui lòng kiểm tra xem bạn đã chạy \`python app.py\` chưa.\n\n_Chuyển sang chế độ Demo..._`);
             }
         }
 
