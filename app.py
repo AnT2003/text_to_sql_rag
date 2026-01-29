@@ -14,12 +14,6 @@ from sqlalchemy import desc
 # Tắt cảnh báo token của HuggingFace
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 
-# --- 2. IMPORT THƯ VIỆN RAG (Giữ lại import để tránh lỗi nếu mở rộng sau này) ---
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
-from langchain_community.retrievers import BM25Retriever
-
 load_dotenv()
 app = Flask(__name__)
 CORS(app) # Bật CORS để tránh lỗi kết nối trên Render
@@ -307,3 +301,4 @@ def reload_schema():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
