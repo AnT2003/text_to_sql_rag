@@ -18,7 +18,7 @@ DB_FILE = "chat_history.db"
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
 # API Key (Ưu tiên lấy từ .env)
-DEFAULT_API_KEY = '7f3871d7eeda4f7bba3f5e9af5ed4160.0JxbbZaMCoPcM8-0gGKIcdNd'
+DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 
 # BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
 # Hệ thống sẽ nạp 100% Bảng và Hàm vào đây để AI đọc mỗi lần chat
@@ -255,4 +255,5 @@ def reload_schema():
     return jsonify({"status": "success", "message": "Đã nạp lại toàn bộ dữ liệu Schema!"})
 
 if __name__ == '__main__':
+
     app.run(debug=True, port=5000)
