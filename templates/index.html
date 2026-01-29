@@ -1,300 +1,258 @@
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SQL Assistant Pro</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        pre { background: #2d2d2d; color: #ccc; padding: 10px; border-radius: 6px; overflow-x: auto; }
-        /* Scrollbar custom */
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #f1f1f1; }
-        ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #555; }
+import os
+import json
+import glob
+import sqlite3
+import datetime
+from flask import Flask, render_template, request, jsonify
+from dotenv import load_dotenv
+from ollama import Client
+
+# --- 1. SETUP MÔI TRƯỜNG ---
+load_dotenv()
+app = Flask(__name__)
+
+# --- 2. CẤU HÌNH HỆ THỐNG ---
+SCHEMA_FOLDER = "./schemas"
+DB_FILE = "chat_history.db"
+# Cấu hình Ollama (Cloud hoặc Local)
+OLLAMA_HOST = "https://ollama.com"
+MODEL_NAME = "gpt-oss:120b"
+# API Key (Ưu tiên lấy từ .env)
+DEFAULT_API_KEY = '7f3871d7eeda4f7bba3f5e9af5ed4160.0JxbbZaMCoPcM8-0gGKIcdNd'
+
+# BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
+# Hệ thống sẽ nạp 100% Bảng và Hàm vào đây để AI đọc mỗi lần chat
+GLOBAL_FULL_SCHEMA = ""
+
+# =========================================================
+#  PHẦN 3: QUẢN LÝ DATABASE (SQLITE) - LƯU LỊCH SỬ CHAT
+# =========================================================
+def init_db():
+    """Khởi tạo database SQLite nếu chưa có"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS sessions 
+                 (id TEXT PRIMARY KEY, title TEXT, created_at DATETIME)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS messages 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME)''')
+    conn.commit()
+    conn.close()
+
+def get_chat_history_formatted(session_id, limit=10):
+    """Lấy lịch sử chat của một phiên cụ thể"""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?", (session_id, limit))
+    rows = c.fetchall()
+    conn.close()
+    
+    history = []
+    # Đảo ngược để xếp theo thứ tự thời gian cũ -> mới (User hỏi -> AI trả lời)
+    for r in rows[::-1]:
+        history.append({"role": r["role"], "content": r["content"]})
+    return history
+
+def save_message(session_id, role, content):
+    """Lưu tin nhắn vào DB"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", 
+              (session_id, role, content, datetime.datetime.now()))
+    conn.commit()
+    conn.close()
+
+def create_session_if_not_exists(session_id, first_msg):
+    """Tạo phiên chat mới nếu chưa tồn tại"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
+    if not c.fetchone():
+        # Lấy 50 ký tự đầu của tin nhắn làm tiêu đề
+        c.execute("INSERT INTO sessions (id, title, created_at) VALUES (?, ?, ?)", 
+                  (session_id, first_msg[:50], datetime.datetime.now()))
+        conn.commit()
+    conn.close()
+
+# =========================================================
+#  PHẦN 4: KỸ THUẬT FULL-CONTEXT LOADING (ĐỌC TOÀN BỘ)
+# =========================================================
+def load_all_schemas():
+    """
+    Kỹ thuật Advanced: Đọc TẤT CẢ file trong thư mục schemas và gộp lại nguyên bản.
+    Không dùng Regex cắt gọt, để AI tự đọc Raw Data (DDL/Definition) để hiểu ngữ cảnh sâu nhất.
+    """
+    global GLOBAL_FULL_SCHEMA
+    print("🚀 Đang nạp TOÀN BỘ Schemas vào bộ nhớ (Full Context)...")
+    
+    if not os.path.exists(SCHEMA_FOLDER): 
+        print(f"⚠️ Không tìm thấy thư mục {SCHEMA_FOLDER}")
+        return
+
+    json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
+    schema_parts = []
+    
+    for file_path in json_files:
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                items = data if isinstance(data, list) else [data]
+                
+                for item in items:
+                    # --- XỬ LÝ TABLE (BẢNG) ---
+                    if 'table_name' in item:
+                        name = item.get('table_name', 'Unknown')
+                        desc = item.get('description', '')
+                        # Format đơn giản: Tên cột (Kiểu dữ liệu)
+                        cols = [f"- {c['name']} ({c.get('type')})" for c in item.get('columns', [])]
+                        col_str = "\n".join(cols)
+                        
+                        schema_parts.append(f"""
+[TABLE SCHEMA]
+Name: `{name}`
+Description: {desc}
+Columns:
+{col_str}
+""")
+                    
+                    # --- XỬ LÝ ROUTINE (HÀM - QUAN TRỌNG NHẤT) ---
+                    elif 'routine_name' in item:
+                        name = item.get('routine_name', 'Unknown')
+                        # Lấy code SQL gốc (quan trọng nhất để hiểu logic CASE WHEN)
+                        # Ưu tiên ddl, nếu không có thì lấy routine_definition
+                        definition = item.get('ddl') or item.get('routine_definition') or ''
+                        desc = item.get('description', '')
+                        
+                        schema_parts.append(f"""
+[ROUTINE / FUNCTION]
+Name: `{name}`
+Description: {desc}
+DEFINITION (SOURCE SQL CODE):
+```sql
+{definition}
+```
+(AI NOTE: Hãy đọc kỹ code SQL trên. Nếu có CASE WHEN, hãy dùng nó để map giá trị ID tương ứng)
+""")
+
+        except Exception as e:
+            print(f"❌ Lỗi đọc file {file_path}: {e}")
+
+    # Gộp tất cả lại thành 1 chuỗi văn bản lớn
+    GLOBAL_FULL_SCHEMA = "\n----------------------------------------\n".join(schema_parts)
+    print(f"✅ Đã nạp xong! Tổng dung lượng Context: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
+
+# --- KHỞI CHẠY LẦN ĐẦU ---
+# Đảm bảo chạy khi file được import hoặc thực thi
+init_db()
+load_all_schemas()
+
+# =========================================================
+#  PHẦN 5: API ROUTES & LOGIC CHAT
+# =========================================================
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/sessions', methods=['GET'])
+def get_sessions():
+    """API lấy danh sách các phiên chat"""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    rows = c.execute("SELECT * FROM sessions ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/history/<session_id>', methods=['GET'])
+def get_history(session_id): 
+    """API lấy nội dung chat"""
+    return jsonify(get_chat_history_formatted(session_id, limit=50))
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    # Sử dụng biến toàn cục chứa toàn bộ schema
+    global GLOBAL_FULL_SCHEMA
+    
+    data = request.json
+    api_key = data.get('api_key') or DEFAULT_API_KEY
+    user_msg = data.get('message')
+    session_id = data.get('session_id')
+
+    if not api_key: return jsonify({"error": "Thiếu API Key"}), 401
+    if not session_id: return jsonify({"error": "Thiếu Session ID"}), 400
+
+    try:
+        # 1. Lưu Session và Tin nhắn User
+        create_session_if_not_exists(session_id, user_msg)
+        save_message(session_id, "user", user_msg)
+
+        # 2. XÂY DỰNG PROMPT CAO CẤP (Đưa toàn bộ Schema vào)
+        # Đây là kỹ thuật "In-Context Learning": Dạy AI bằng chính dữ liệu của bạn ngay trong prompt.
+        system_prompt = f"""Bạn là một chuyên gia BigQuery SQL cao cấp.
+
+[DỮ LIỆU CỦA HỆ THỐNG]:
+Dưới đây là toàn bộ Bảng và Hàm (Routine) bạn có quyền truy cập. 
+HÃY ĐỌC KỸ TOÀN BỘ ĐỂ HIỂU LOGIC DỮ LIỆU:
+
+{GLOBAL_FULL_SCHEMA}
+
+[YÊU CẦU]:
+Viết câu lệnh SQL Standard trả lời câu hỏi của user.
+
+[QUY TẮC QUAN TRỌNG - BẮT BUỘC TUÂN THỦ]:
+1. **Logic Mapping (QUAN TRỌNG NHẤT):**
+   - Hãy tự đọc phần `[ROUTINE / FUNCTION]` ở trên.
+   - Tìm các mệnh đề `CASE WHEN` bên trong code SQL của routine để hiểu ý nghĩa các con số (ID).
+   - Ví dụ: Nếu thấy `WHEN status_id = 2 THEN 'New'`, và user hỏi về 'New', bạn PHẢI dùng `status_id = 2`.
+   - KHÔNG ĐƯỢC ĐOÁN MÒ. Nếu routine định nghĩa khác, hãy theo routine.
+
+2. **Kỹ thuật BigQuery:**
+   - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
+   - ✅ Dùng JOIN (LEFT JOIN) kết hợp GROUP BY nếu cần.
+   - Tên bảng phải đặt trong dấu backtick (`).
+
+3. Chỉ trả về code SQL trong ```sql ... ```.
+"""
+
+        messages_payload = [{"role": "system", "content": system_prompt}]
         
-        .status-badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; }
-        .status-online { background: #d1fae5; color: #065f46; border: 1px solid #34d399; }
-        .status-offline { background: #fee2e2; color: #991b1b; border: 1px solid #f87171; }
-    </style>
-</head>
-<body class="bg-gray-100 h-screen flex">
-
-    <!-- Sidebar -->
-    <div class="w-64 bg-gray-900 text-white flex flex-col h-full shadow-xl">
-        <div class="p-4 border-b border-gray-700 flex justify-between items-center">
-            <h1 class="font-bold text-lg">🗄️ History</h1>
-            <button onclick="createNewSession()" class="text-sm bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded transition" title="New Chat">
-                <i class="fas fa-plus"></i> Mới
-            </button>
-        </div>
+        # Thêm lịch sử chat gần nhất để AI nhớ ngữ cảnh
+        history = get_chat_history_formatted(session_id, limit=10)
+        for msg in history:
+            if msg['content'] != user_msg: 
+                messages_payload.append(msg)
         
-        <div id="sessionList" class="flex-1 overflow-y-auto p-2 space-y-1">
-            <div class="p-3 text-gray-500 text-xs text-center">Đang tải...</div>
-        </div>
+        # Thêm câu hỏi hiện tại
+        messages_payload.append({"role": "user", "content": user_msg})
 
-        <div class="p-4 border-t border-gray-700 text-xs text-gray-400 text-center">
-            <div id="connectionStatus" class="mb-2 status-badge status-offline inline-block">
-                <i class="fas fa-circle text-[8px] mr-1"></i> Disconnected
-            </div>
-            <div>Powered by Ollama & Flask</div>
-        </div>
-    </div>
-
-    <!-- Main Chat Area -->
-    <div class="flex-1 flex flex-col h-full bg-white relative">
+        # 3. Gọi AI
+        client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
         
-        <div class="bg-white shadow-sm p-4 border-b flex justify-between items-center z-10">
-            <h2 class="font-semibold text-gray-700" id="chatTitle">💬 New Chat</h2>
-            <div class="text-xs text-gray-500 flex items-center gap-2">
-                <span>Model: GPT-OSS 120B</span>
-            </div>
-        </div>
+        # Temperature = 0.1: Giữ cho AI đủ sáng tạo để viết SQL nhưng vẫn tuân thủ dữ liệu
+        response = client.chat(
+            model=MODEL_NAME, 
+            messages=messages_payload, 
+            stream=False, 
+            options={"temperature": 0.1}
+        )
+        
+        ai_reply = response['message']['content']
+        
+        # 4. Lưu câu trả lời của AI
+        save_message(session_id, "assistant", ai_reply)
 
-        <div id="chatBox" class="flex-1 p-4 overflow-y-auto space-y-4 pb-24">
-            <div class="text-center text-gray-400 mt-10">
-                <i class="fas fa-robot text-4xl mb-2"></i><br>
-                Chọn một đoạn chat cũ hoặc tạo mới để bắt đầu.
-            </div>
-        </div>
+        return jsonify({"response": ai_reply})
 
-        <div class="absolute bottom-0 w-full bg-white p-4 border-t">
-            <div class="max-w-4xl mx-auto flex gap-2">
-                <input type="text" id="userInput" 
-                    class="flex-1 border border-gray-300 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"
-                    placeholder="Nhập câu hỏi SQL của bạn...">
-                <button onclick="sendMessage()" 
-                    class="bg-blue-600 text-white px-6 rounded-lg font-semibold hover:bg-blue-700 transition shadow-sm">
-                    <i class="fas fa-paper-plane"></i>
-                </button>
-            </div>
-        </div>
-    </div>
+    except Exception as e:
+        print(f"Lỗi Server: {e}")
+        return jsonify({"error": str(e)}), 500
 
-    <script>
-        let currentSessionId = null;
-        let isOfflineMode = false;
+@app.route('/api/reload', methods=['POST'])
+def reload_schema():
+    """API để nạp lại dữ liệu khi bạn sửa file JSON"""
+    load_all_schemas()
+    return jsonify({"status": "success", "message": "Đã nạp lại toàn bộ dữ liệu Schema!"})
 
-        // CẤU HÌNH API BASE URL
-        const API_BASE = (window.location.protocol === 'file:' || window.location.origin === 'null' || window.location.href.startsWith('blob:'))
-            ? 'http://127.0.0.1:5000'
-            : '';
-
-        document.addEventListener("DOMContentLoaded", () => {
-            loadSessions();
-            createNewSession();
-        });
-
-        function updateConnectionStatus(isOnline) {
-            const el = document.getElementById('connectionStatus');
-            if (isOnline) {
-                el.className = 'mb-2 status-badge status-online inline-block';
-                el.innerHTML = '<i class="fas fa-circle text-[8px] mr-1"></i> Connected';
-                isOfflineMode = false;
-            } else {
-                el.className = 'mb-2 status-badge status-offline inline-block';
-                el.innerHTML = '<i class="fas fa-exclamation-triangle text-[8px] mr-1"></i> No Backend';
-                isOfflineMode = true;
-            }
-        }
-
-        function generateUUID() {
-            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-                return v.toString(16);
-            });
-        }
-
-        function createNewSession() {
-            currentSessionId = generateUUID();
-            document.getElementById('chatBox').innerHTML = `
-                <div class="text-center text-gray-400 mt-10">
-                    <i class="fas fa-robot text-4xl mb-2"></i><br>
-                    Chat mới đã sẵn sàng. Hãy hỏi gì đó!
-                    ${isOfflineMode ? '<div class="text-xs text-red-400 mt-2">(Đang chạy chế độ Demo Offline)</div>' : ''}
-                </div>`;
-            document.getElementById('chatTitle').innerText = "💬 New Chat";
-            document.querySelectorAll('.session-item').forEach(el => el.classList.remove('bg-gray-700'));
-        }
-
-        async function loadSessions() {
-            const container = document.getElementById('sessionList');
-            try {
-                const res = await fetch(`${API_BASE}/api/sessions`);
-                // Nếu server trả về lỗi (như 500), throw error để hiển thị
-                if (!res.ok) {
-                     throw new Error(`Server Error: ${res.status} ${res.statusText}`);
-                }
-                
-                const sessions = await res.json();
-                updateConnectionStatus(true); // Kết nối thành công
-                renderSessionList(sessions);
-            } catch (e) { 
-                console.warn("Session load failed:", e);
-                // Chỉ switch sang offline nếu là lỗi mạng (Failed to fetch)
-                if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError') || e.message.includes('Network request failed')) {
-                     updateConnectionStatus(false);
-                     const mockSessions = [
-                        { id: 'mock-1', title: 'Phân tích doanh thu tháng 10 (Demo)' },
-                        { id: 'mock-2', title: 'Truy vấn khách hàng VIP (Demo)' }
-                    ];
-                    renderSessionList(mockSessions);
-                } else {
-                    // Lỗi server (500, 404, etc) thì báo lỗi cụ thể
-                    container.innerHTML = `<div class="p-3 text-red-400 text-xs text-center border border-red-800 rounded mx-2 bg-red-900/20">Lỗi: ${e.message}</div>`;
-                }
-            }
-        }
-
-        function renderSessionList(sessions) {
-            const container = document.getElementById('sessionList');
-            container.innerHTML = '';
-            
-            if (sessions.length === 0) {
-                container.innerHTML = '<div class="p-3 text-gray-500 text-xs text-center">Chưa có lịch sử.</div>';
-                return;
-            }
-
-            sessions.forEach(s => {
-                const div = document.createElement('div');
-                div.className = `session-item p-3 rounded cursor-pointer hover:bg-gray-700 transition text-sm truncate ${s.id === currentSessionId ? 'bg-gray-700' : ''}`;
-                div.innerText = s.title || "Không có tiêu đề";
-                div.onclick = () => isOfflineMode ? alert("Chế độ Demo: Không thể tải chi tiết chat thực.") : loadChatHistory(s.id, s.title);
-                container.appendChild(div);
-            });
-        }
-
-        async function loadChatHistory(sessionId, title) {
-            // Cho phép load lại kể cả khi đang offline để retry
-            // if (isOfflineMode) return; 
-            
-            currentSessionId = sessionId;
-            document.getElementById('chatTitle').innerText = "💬 " + title;
-            document.getElementById('chatBox').innerHTML = '<div class="text-center text-gray-500 mt-10">Đang tải lịch sử...</div>';
-            
-            document.querySelectorAll('.session-item').forEach(el => el.classList.remove('bg-gray-700'));
-            loadSessions(); 
-
-            try {
-                const res = await fetch(`${API_BASE}/api/history/${sessionId}`);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const messages = await res.json();
-                
-                const chatBox = document.getElementById('chatBox');
-                chatBox.innerHTML = '';
-                
-                if (messages.length === 0) {
-                     chatBox.innerHTML = '<div class="text-center text-gray-400 mt-10">Chat trống.</div>';
-                }
-
-                messages.forEach(msg => {
-                    appendMessage(msg.role === 'user' ? 'user' : 'bot', msg.content);
-                });
-
-            } catch(e) { 
-                console.error("Lỗi load history:", e);
-                document.getElementById('chatBox').innerHTML = `<div class="text-center text-red-500 mt-10">❌ Lỗi tải lịch sử chat: ${e.message}</div>`;
-            }
-        }
-
-        async function sendMessage() {
-            const input = document.getElementById('userInput');
-            const text = input.value.trim();
-            if (!text || !currentSessionId) return;
-
-            appendMessage('user', text);
-            input.value = '';
-            const loadingId = appendMessage('bot', '...', true);
-
-            // BỎ CHECK isOfflineMode Ở ĐÂY để luôn thử gọi API thật
-            // Nếu gọi thất bại, catch block bên dưới sẽ xử lý
-            
-            try {
-                const res = await fetch(`${API_BASE}/api/chat`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        session_id: currentSessionId,
-                        message: text
-                    })
-                });
-                
-                // Nếu thành công (có thể trước đó offline), chuyển lại sang online
-                if (res.ok && isOfflineMode) {
-                    updateConnectionStatus(true);
-                }
-
-                // Cố gắng đọc JSON lỗi từ server nếu có
-                let data;
-                try {
-                    data = await res.json();
-                } catch (jsonErr) {
-                    data = { error: `Server Error ${res.status}: ${res.statusText}` };
-                }
-
-                document.getElementById(loadingId).remove();
-
-                if (!res.ok) {
-                    // Lỗi từ Server trả về (VD: 500, 400) -> HIỂN THỊ CHI TIẾT
-                    console.error("Server Error Response:", data);
-                    appendMessage('bot', `❌ **Lỗi Server (${res.status}):**\n\`${data.error || JSON.stringify(data)}\``);
-                } else {
-                    // Thành công
-                    if (data.error) {
-                         appendMessage('bot', '❌ Lỗi: ' + data.error);
-                    } else {
-                        appendMessage('bot', data.response);
-                        loadSessions(); 
-                    }
-                }
-            } catch (e) {
-                // Chỉ khi lỗi mạng (Network Error / Failed to fetch) mới hiển thị thông báo offline/demo
-                document.getElementById(loadingId).remove();
-                console.error("Network Error:", e);
-                
-                if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
-                    updateConnectionStatus(false);
-                    const mockReply = `⚠️ **Kết nối thất bại!**\n\nKhông thể gọi API Backend. Vui lòng kiểm tra:\n1. Server Python đã chạy chưa? (\`python app.py\`)\n2. Server có đang bị lỗi và crash không?\n\n_Giả lập câu trả lời demo:_\n\`\`\`sql\nSELECT * FROM demo WHERE id = 1;\n\`\`\``;
-                    appendMessage('bot', mockReply);
-                } else {
-                    // Các lỗi khác (Javascript logic)
-                    appendMessage('bot', `❌ **Lỗi Client:**\n\`${e.message}\``);
-                }
-            }
-        }
-
-        function appendMessage(role, text, isLoading = false) {
-            const chatBox = document.getElementById('chatBox');
-            if (chatBox.innerText.includes("Chọn một đoạn chat cũ") || chatBox.innerText.includes("Chat mới đã sẵn sàng")) {
-                chatBox.innerHTML = '';
-            }
-
-            const div = document.createElement('div');
-            div.id = isLoading ? 'loading-msg' : '';
-            div.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'}`;
-
-            let innerHTML = '';
-            if (isLoading) {
-                innerHTML = `<div class="bg-gray-200 text-gray-500 px-4 py-2 rounded-lg italic text-sm">Đang suy nghĩ...</div>`;
-            } else if (role === 'user') {
-                innerHTML = `<div class="bg-blue-600 text-white px-4 py-2 rounded-lg max-w-[80%] shadow-md whitespace-pre-wrap">${text}</div>`;
-            } else {
-                const parsed = marked.parse(text);
-                innerHTML = `<div class="bg-white border border-gray-200 text-gray-800 px-4 py-2 rounded-lg max-w-[90%] shadow-sm prose prose-sm overflow-hidden">${parsed}</div>`;
-            }
-
-            div.innerHTML = innerHTML;
-            chatBox.appendChild(div);
-            chatBox.scrollTop = chatBox.scrollHeight;
-            return div.id;
-        }
-
-        document.getElementById('userInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendMessage();
-        });
-    </script>
-</body>
-</html>
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
