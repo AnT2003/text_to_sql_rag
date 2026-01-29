@@ -32,14 +32,19 @@ GLOBAL_ALL_NAMES = []
 #  PHẦN 3: QUẢN LÝ DATABASE (SQLITE)
 # =========================================================
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS sessions 
-                 (id TEXT PRIMARY KEY, title TEXT, created_at DATETIME)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS messages 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME)''')
-    conn.commit()
-    conn.close()
+    """Khởi tạo database và bảng nếu chưa tồn tại"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS sessions 
+                     (id TEXT PRIMARY KEY, title TEXT, created_at DATETIME)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS messages 
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME)''')
+        conn.commit()
+        conn.close()
+        print("✅ Database initialized (Sessions & Messages tables ready).")
+    except Exception as e:
+        print(f"❌ Database init error: {e}")
 
 def get_chat_history_formatted(session_id, limit=10):
     conn = sqlite3.connect(DB_FILE)
@@ -297,7 +302,7 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 
 4. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
-        
+
         messages_payload = [{"role": "system", "content": system_prompt}]
         
         # Thêm lịch sử chat
@@ -330,8 +335,10 @@ def reload_schema():
     load_all_schemas()
     return jsonify({"status": "success", "message": "Đã nạp lại dữ liệu (Mode: Two-Stage RAG)!"})
 
+# --- KHỞI CHẠY HỆ THỐNG ---
+# Chạy ngay khi import để tránh lỗi 'No such table' khi dùng flask run
+init_db()
+load_all_schemas()
+
 if __name__ == '__main__':
-    # Init DB & Load Schema
-    init_db()
-    load_all_schemas()
     app.run(debug=True, port=5000)
