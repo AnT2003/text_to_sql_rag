@@ -1,0 +1,100 @@
+[{
+  "table_name": "journal_details",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.journal_details`\n(\n  id INT64,\n  journal_id INT64,\n  property STRING,\n  prop_key STRING,\n  old_value STRING,\n  value STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "queries_roles",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.queries_roles`\n(\n  query_id INT64,\n  role_id INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64, is_deleted BOOL\u003e\n)\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "members",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.members`\n(\n  id INT64,\n  user_id INT64,\n  project_id INT64,\n  created_on TIMESTAMP,\n  mail_notification INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "custom_fields_projects",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.custom_fields_projects`\n(\n  custom_field_id INT64,\n  project_id INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64, is_deleted BOOL\u003e\n)\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "users",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.users`\n(\n  id INT64,\n  login STRING,\n  hashed_password STRING,\n  firstname STRING,\n  lastname STRING,\n  admin INT64,\n  status INT64,\n  last_login_on DATETIME,\n  language STRING,\n  auth_source_id INT64,\n  created_on TIMESTAMP,\n  updated_on TIMESTAMP,\n  type STRING,\n  mail_notification STRING,\n  salt STRING,\n  must_change_passwd INT64,\n  passwd_changed_on DATETIME,\n  twofa_scheme STRING,\n  twofa_totp_key STRING,\n  twofa_totp_last_used_at INT64,\n  twofa_required INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "member_roles",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.member_roles`\n(\n  id INT64,\n  member_id INT64,\n  role_id INT64,\n  inherited_from INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "tokens",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.tokens`\n(\n  id INT64,\n  user_id INT64,\n  action STRING,\n  value STRING,\n  created_on DATETIME,\n  updated_on TIMESTAMP,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "wikis",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.wikis`\n(\n  id INT64,\n  project_id INT64,\n  start_page STRING,\n  status INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "custom_fields",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.custom_fields`\n(\n  id INT64,\n  type STRING,\n  name STRING,\n  field_format STRING,\n  possible_values STRING,\n  regexp STRING,\n  min_length INT64,\n  max_length INT64,\n  is_required INT64,\n  is_for_all INT64,\n  is_filter INT64,\n  position INT64,\n  searchable INT64,\n  default_value STRING,\n  editable INT64,\n  visible INT64,\n  multiple INT64,\n  format_store STRING,\n  description STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "attachments",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.attachments`\n(\n  id INT64,\n  container_id INT64,\n  container_type STRING,\n  filename STRING,\n  disk_filename STRING,\n  filesize INT64,\n  content_type STRING,\n  digest STRING,\n  downloads INT64,\n  author_id INT64,\n  created_on TIMESTAMP,\n  description STRING,\n  disk_directory STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "issue_statuses",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.issue_statuses`\n(\n  id INT64,\n  name STRING,\n  description STRING,\n  is_closed INT64,\n  position INT64,\n  default_done_ratio INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "projects",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.projects`\n(\n  id INT64,\n  name STRING,\n  description STRING,\n  homepage STRING,\n  is_public INT64,\n  parent_id INT64,\n  created_on TIMESTAMP,\n  updated_on TIMESTAMP,\n  identifier STRING,\n  status INT64,\n  lft INT64,\n  rgt INT64,\n  inherit_members INT64,\n  default_version_id INT64,\n  default_assigned_to_id INT64,\n  default_issue_query_id INT64,\n  new_ticket_message STRING,\n  enable_new_ticket_message INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "projects_trackers",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.projects_trackers`\n(\n  project_id INT64,\n  tracker_id INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64, is_deleted BOOL\u003e\n)\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "issue_relations",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.issue_relations`\n(\n  id INT64,\n  issue_from_id INT64,\n  issue_to_id INT64,\n  relation_type STRING,\n  delay INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "custom_fields_trackers",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.custom_fields_trackers`\n(\n  custom_field_id INT64,\n  tracker_id INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64, is_deleted BOOL\u003e\n)\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "roles",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.roles`\n(\n  id INT64,\n  name STRING,\n  position INT64,\n  assignable INT64,\n  builtin INT64,\n  permissions STRING,\n  issues_visibility STRING,\n  users_visibility STRING,\n  time_entries_visibility STRING,\n  all_roles_managed INT64,\n  settings STRING,\n  default_time_entry_activity_id INT64,\n  hide INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "enabled_modules",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.enabled_modules`\n(\n  id INT64,\n  project_id INT64,\n  name STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "journals",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.journals`\n(\n  id INT64,\n  journalized_id INT64,\n  journalized_type STRING,\n  user_id INT64,\n  notes STRING,\n  created_on DATETIME,\n  updated_on DATETIME,\n  updated_by_id INT64,\n  private_notes INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "sessions",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.sessions`\n(\n  id INT64,\n  session_id STRING,\n  data STRING,\n  created_at DATETIME,\n  updated_at DATETIME,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "settings",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.settings`\n(\n  id INT64,\n  name STRING,\n  value STRING,\n  updated_on TIMESTAMP,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "workflows",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.workflows`\n(\n  id INT64,\n  tracker_id INT64,\n  old_status_id INT64,\n  new_status_id INT64,\n  role_id INT64,\n  assignee INT64,\n  author INT64,\n  type STRING,\n  field_name STRING,\n  rule STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "queries",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.queries`\n(\n  id INT64,\n  project_id INT64,\n  name STRING,\n  filters STRING,\n  user_id INT64,\n  column_names STRING,\n  sort_criteria STRING,\n  group_by STRING,\n  type STRING,\n  visibility INT64,\n  options STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "custom_values",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.custom_values`\n(\n  id INT64,\n  customized_type STRING,\n  customized_id INT64,\n  custom_field_id INT64,\n  value STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "watchers",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.watchers`\n(\n  id INT64,\n  watchable_type STRING,\n  watchable_id INT64,\n  user_id INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "issue_categories",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.issue_categories`\n(\n  id INT64,\n  project_id INT64,\n  name STRING,\n  assigned_to_id INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "dashboards",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.dashboards`\n(\n  id INT64,\n  name STRING,\n  description STRING,\n  dashboard_type STRING,\n  system_default INT64,\n  always_expose INT64,\n  enable_sidebar INT64,\n  project_id INT64,\n  author_id INT64,\n  visibility INT64,\n  options STRING,\n  created_at DATETIME,\n  updated_at DATETIME,\n  locked INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "enumerations",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.enumerations`\n(\n  id INT64,\n  name STRING,\n  position INT64,\n  is_default INT64,\n  type STRING,\n  active INT64,\n  project_id INT64,\n  parent_id INT64,\n  position_name STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "trackers",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.trackers`\n(\n  id INT64,\n  name STRING,\n  description STRING,\n  position INT64,\n  is_in_roadmap INT64,\n  fields_bits INT64,\n  default_status_id INT64,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "schema_migrations",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.schema_migrations`\n(\n  version STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (version) NOT ENFORCED\n)\nCLUSTER BY version\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "user_preferences",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.user_preferences`\n(\n  id INT64,\n  user_id INT64,\n  others STRING,\n  hide_mail INT64,\n  time_zone STRING,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "ar_internal_metadata",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.ar_internal_metadata`\n(\n  key STRING,\n  value STRING,\n  created_at DATETIME,\n  updated_at DATETIME,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (key) NOT ENFORCED\n)\nCLUSTER BY key\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "issues",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.issues`\n(\n  id INT64,\n  tracker_id INT64,\n  project_id INT64,\n  subject STRING,\n  description STRING,\n  due_date DATE,\n  category_id INT64,\n  status_id INT64,\n  assigned_to_id INT64,\n  priority_id INT64,\n  fixed_version_id INT64,\n  author_id INT64,\n  lock_version INT64,\n  created_on TIMESTAMP,\n  updated_on TIMESTAMP,\n  start_date DATE,\n  done_ratio INT64,\n  estimated_hours FLOAT64,\n  parent_id INT64,\n  root_id INT64,\n  lft INT64,\n  rgt INT64,\n  is_private INT64,\n  closed_on DATETIME,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}, {
+  "table_name": "email_addresses",
+  "ddl": "CREATE TABLE `kynaforkids-server-production.redmine_kyna_task_live.email_addresses`\n(\n  id INT64,\n  user_id INT64,\n  address STRING,\n  is_default INT64,\n  notify INT64,\n  created_on DATETIME,\n  updated_on DATETIME,\n  datastream_metadata STRUCT\u003cuuid STRING, source_timestamp INT64\u003e,\n  PRIMARY KEY (id) NOT ENFORCED\n)\nCLUSTER BY id\nOPTIONS(\n  max_staleness\u003dINTERVAL \u00270-0 0 8:0:0\u0027 YEAR TO SECOND\n);"
+}]

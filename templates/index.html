@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL Assistant Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        pre { background: #2d2d2d; color: #ccc; padding: 10px; border-radius: 6px; overflow-x: auto; }
+        /* Scrollbar custom */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen flex">
+
+    <div class="w-64 bg-gray-900 text-white flex flex-col h-full shadow-xl">
+        <div class="p-4 border-b border-gray-700 flex justify-between items-center">
+            <h1 class="font-bold text-lg">🗄️ History</h1>
+            <button onclick="createNewSession()" class="text-sm bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded transition" title="New Chat">
+                <i class="fas fa-plus"></i> Mới
+            </button>
+        </div>
+        
+        <div id="sessionList" class="flex-1 overflow-y-auto p-2 space-y-1">
+            </div>
+
+        <div class="p-4 border-t border-gray-700 text-xs text-gray-400 text-center">
+            Powered by Ollama & Flask
+        </div>
+    </div>
+
+    <div class="flex-1 flex flex-col h-full bg-white relative">
+        
+        <div class="bg-white shadow-sm p-4 border-b flex justify-between items-center z-10">
+            <h2 class="font-semibold text-gray-700" id="chatTitle">💬 New Chat</h2>
+            <div class="text-xs text-gray-500">Model: GPT-OSS 120B</div>
+        </div>
+
+        <div id="chatBox" class="flex-1 p-4 overflow-y-auto space-y-4 pb-24">
+            <div class="text-center text-gray-400 mt-10">
+                <i class="fas fa-robot text-4xl mb-2"></i><br>
+                Chọn một đoạn chat cũ hoặc tạo mới để bắt đầu.
+            </div>
+        </div>
+
+        <div class="absolute bottom-0 w-full bg-white p-4 border-t">
+            <div class="max-w-4xl mx-auto flex gap-2">
+                <input type="text" id="userInput" 
+                    class="flex-1 border border-gray-300 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"
+                    placeholder="Nhập câu hỏi SQL của bạn...">
+                <button onclick="sendMessage()" 
+                    class="bg-blue-600 text-white px-6 rounded-lg font-semibold hover:bg-blue-700 transition shadow-sm">
+                    <i class="fas fa-paper-plane"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentSessionId = null;
+
+        // 1. Khởi tạo: Load danh sách session
+        document.addEventListener("DOMContentLoaded", () => {
+            loadSessions();
+            createNewSession(); // Mặc định vào là tạo chat mới luôn
+        });
+
+        // Tạo UUID đơn giản cho Session ID
+        function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        function createNewSession() {
+            currentSessionId = generateUUID();
+            document.getElementById('chatBox').innerHTML = `
+                <div class="text-center text-gray-400 mt-10">
+                    <i class="fas fa-robot text-4xl mb-2"></i><br>
+                    Chat mới đã sẵn sàng. Hãy hỏi gì đó!
+                </div>`;
+            document.getElementById('chatTitle').innerText = "💬 New Chat";
+            
+            // Xóa active class ở sidebar
+            document.querySelectorAll('.session-item').forEach(el => el.classList.remove('bg-gray-700'));
+        }
+
+        async function loadSessions() {
+            try {
+                const res = await fetch('/api/sessions');
+                const sessions = await res.json();
+                const container = document.getElementById('sessionList');
+                container.innerHTML = '';
+
+                sessions.forEach(s => {
+                    const div = document.createElement('div');
+                    div.className = `session-item p-3 rounded cursor-pointer hover:bg-gray-700 transition text-sm truncate ${s.id === currentSessionId ? 'bg-gray-700' : ''}`;
+                    div.innerText = s.title || "Không có tiêu đề";
+                    div.onclick = () => loadChatHistory(s.id, s.title);
+                    container.appendChild(div);
+                });
+            } catch (e) { console.error(e); }
+        }
+
+        async function loadChatHistory(sessionId, title) {
+            currentSessionId = sessionId;
+            document.getElementById('chatTitle').innerText = "💬 " + title;
+            document.getElementById('chatBox').innerHTML = '<div class="text-center">Đang tải lịch sử...</div>';
+            
+            // Highlight active item
+            document.querySelectorAll('.session-item').forEach(el => el.classList.remove('bg-gray-700'));
+            // Tìm và highlight item hiện tại (đơn giản hóa)
+            loadSessions(); 
+
+            try {
+                const res = await fetch(`/api/history/${sessionId}`);
+                const messages = await res.json();
+                
+                const chatBox = document.getElementById('chatBox');
+                chatBox.innerHTML = '';
+                
+                if (messages.length === 0) {
+                     chatBox.innerHTML = '<div class="text-center text-gray-400 mt-10">Chat trống.</div>';
+                }
+
+                messages.forEach(msg => {
+                    appendMessage(msg.role === 'user' ? 'user' : 'bot', msg.content);
+                });
+
+            } catch(e) { console.error(e); }
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('userInput');
+            const text = input.value.trim();
+            if (!text || !currentSessionId) return;
+
+            // UI Update
+            appendMessage('user', text);
+            input.value = '';
+            const loadingId = appendMessage('bot', '...', true);
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        session_id: currentSessionId,
+                        message: text
+                    })
+                });
+                
+                const data = await res.json();
+                document.getElementById(loadingId).remove();
+
+                if (data.error) appendMessage('bot', '❌ Lỗi: ' + data.error);
+                else {
+                    appendMessage('bot', data.response);
+                    loadSessions(); // Reload sidebar để cập nhật tiêu đề mới nếu cần
+                }
+            } catch (e) {
+                document.getElementById(loadingId).remove();
+                appendMessage('bot', '❌ Lỗi kết nối server.');
+            }
+        }
+
+        function appendMessage(role, text, isLoading = false) {
+            const chatBox = document.getElementById('chatBox');
+            // Xóa message chào mừng nếu có
+            if (chatBox.innerText.includes("Chọn một đoạn chat cũ")) chatBox.innerHTML = '';
+
+            const div = document.createElement('div');
+            div.id = isLoading ? 'loading-msg' : '';
+            div.className = `flex ${role === 'user' ? 'justify-end' : 'justify-start'}`;
+
+            let innerHTML = '';
+            if (isLoading) {
+                innerHTML = `<div class="bg-gray-200 text-gray-500 px-4 py-2 rounded-lg italic text-sm">Đang suy nghĩ...</div>`;
+            } else if (role === 'user') {
+                innerHTML = `<div class="bg-blue-600 text-white px-4 py-2 rounded-lg max-w-[80%] shadow-md whitespace-pre-wrap">${text}</div>`;
+            } else {
+                const parsed = marked.parse(text);
+                innerHTML = `<div class="bg-white border border-gray-200 text-gray-800 px-4 py-2 rounded-lg max-w-[90%] shadow-sm prose prose-sm overflow-hidden">${parsed}</div>`;
+            }
+
+            div.innerHTML = innerHTML;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+            return div.id;
+        }
+
+        document.getElementById('userInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>
