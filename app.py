@@ -10,28 +10,16 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
 
 # --- 1. SETUP MÔI TRƯỜNG ---
-# Tắt cảnh báo token của HuggingFace
+# Tắt cảnh báo token (dù không dùng HF nữa nhưng cứ để tránh lỗi env cũ)
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
-
-# --- 2. IMPORT THƯ VIỆN RAG ---
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
-from langchain_community.retrievers import BM25Retriever
 
 load_dotenv()
 app = Flask(__name__)
-CORS(app) # Bật CORS để tránh lỗi kết nối từ Frontend
+CORS(app) # Bật CORS để tránh lỗi kết nối Frontend
 
-# --- 3. CẤU HÌNH ---
+# --- 2. CẤU HÌNH ---
 SCHEMA_FOLDER = "./schemas"
-OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gpt-oss:120b"
-DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
-
-# Cấu hình Database (Tự động thích ứng SQLite/Postgres)
-# Nếu chạy local: dùng sqlite:///chat_history.db
-# Nếu chạy Render: dùng biến môi trường DATABASE_URL
+# Cấu hình Database (Tự động thích ứng SQLite/Postgres cho Render)
 db_url = os.getenv("DATABASE_URL", "sqlite:///chat_history.db")
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -41,15 +29,16 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# --- BIẾN TOÀN CỤC (CACHE) ---
-# 1. Chứa toàn bộ Logic Routines (Luôn gửi cho AI để đảm bảo hiểu đúng giá trị)
-GLOBAL_ROUTINES_CONTEXT = "" 
-# 2. Các bộ tìm kiếm Bảng (Lưu riêng lẻ để xử lý thủ công)
-VECTOR_RETRIEVER = None
-BM25_RETRIEVER = None
+OLLAMA_HOST = "https://ollama.com"
+MODEL_NAME = "gpt-oss:120b"
+DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
+
+# BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
+# Kỹ thuật: Full Context Loading - Nạp 100% dữ liệu vào RAM
+GLOBAL_FULL_SCHEMA = ""
 
 # =========================================================
-#  PHẦN 4: QUẢN LÝ DATABASE (LƯU LỊCH SỬ CHAT)
+#  PHẦN 3: QUẢN LÝ DATABASE (SQLAlchemy)
 # =========================================================
 class Session(db.Model):
     __tablename__ = 'sessions'
@@ -68,7 +57,7 @@ class Message(db.Model):
 def init_db():
     with app.app_context():
         db.create_all()
-        print("✅ Database Connected.")
+        print("✅ Database Connected (SQLite/PostgreSQL).")
 
 def save_message(session_id, role, content):
     try:
@@ -83,7 +72,6 @@ def create_session_if_not_exists(session_id, first_msg):
     try:
         session = Session.query.get(session_id)
         if not session:
-            # Lấy 50 ký tự đầu làm tiêu đề
             title = (first_msg[:50] + '...') if len(first_msg) > 50 else first_msg
             db.session.add(Session(id=session_id, title=title))
             db.session.commit()
@@ -95,33 +83,30 @@ def get_chat_history_formatted(session_id, limit=10):
     try:
         msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
         history = []
-        for m in msgs[::-1]: # Đảo ngược thành cũ -> mới
+        for m in msgs[::-1]: 
             history.append({"role": m.role, "content": m.content})
         return history
     except:
         return []
 
 # =========================================================
-#  PHẦN 5: ADVANCED RAG INITIALIZATION
+#  PHẦN 4: LOAD TOÀN BỘ SCHEMA (FULL CONTEXT KNOWLEDGE)
 # =========================================================
-def init_advanced_rag():
+def load_all_schemas():
     """
-    Khởi tạo hệ thống RAG phân tầng:
-    1. Routines: Nạp Full vào biến toàn cục GLOBAL_ROUTINES_CONTEXT (Ưu tiên cao nhất).
-    2. Tables: Index vào Vector Store & BM25 để tìm kiếm khi cần.
+    Đọc nguyên văn toàn bộ file JSON và nạp vào biến GLOBAL_FULL_SCHEMA.
+    AI sẽ đọc trực tiếp từ biến này, đảm bảo không bao giờ lỗi thiếu thư viện hay sót dữ liệu.
     """
-    global GLOBAL_ROUTINES_CONTEXT, VECTOR_RETRIEVER, BM25_RETRIEVER
-    print("🚀 Đang khởi tạo Advanced RAG System...")
-
+    global GLOBAL_FULL_SCHEMA
+    print("🚀 Đang nạp TOÀN BỘ Schemas vào bộ nhớ (Full Context)...")
+    
     if not os.path.exists(SCHEMA_FOLDER): 
         print(f"⚠️ Không tìm thấy thư mục {SCHEMA_FOLDER}")
         return
 
     json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
+    schema_parts = []
     
-    table_docs = []
-    routine_texts = []
-
     for file_path in json_files:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -129,84 +114,52 @@ def init_advanced_rag():
                 items = data if isinstance(data, list) else [data]
                 
                 for item in items:
-                    # --- XỬ LÝ ROUTINE (Hàm Logic) ---
-                    # Logic: Hàm chứa quy tắc nghiệp vụ (CASE WHEN), AI cần thấy nó MỌI LÚC.
-                    if 'routine_name' in item:
+                    # --- XỬ LÝ TABLE ---
+                    if 'table_name' in item:
+                        name = item.get('table_name', 'Unknown')
+                        desc = item.get('description', '')
+                        cols = [f"- {c['name']} ({c.get('type')})" for c in item.get('columns', [])]
+                        col_str = "\n".join(cols)
+                        
+                        schema_parts.append(f"""
+[TABLE SCHEMA]
+Name: `{name}`
+Description: {desc}
+Columns:
+{col_str}
+""")
+                    
+                    # --- XỬ LÝ ROUTINE (Hàm Logic - Quan trọng nhất) ---
+                    elif 'routine_name' in item:
                         name = item.get('routine_name', 'Unknown')
-                        # Lấy definition hoặc ddl
+                        # Lấy code SQL gốc để AI tự đọc logic CASE WHEN
                         definition = item.get('routine_definition') or item.get('ddl') or ''
                         desc = item.get('description', '')
                         
-                        # Tạo đoạn văn bản mô tả routine để nạp global
-                        r_text = f"FUNCTION NAME: {name}\nDESCRIPTION: {desc}\nLOGIC CODE:\n```sql\n{definition}\n```"
-                        routine_texts.append(r_text)
-
-                    # --- XỬ LÝ TABLE (Bảng Dữ liệu) ---
-                    # Logic: Bảng rất nhiều, chỉ tìm bảng liên quan khi cần.
-                    elif 'table_name' in item:
-                        name = item.get('table_name', 'Unknown')
-                        desc = item.get('description', '')
-                        cols = [f"{c['name']} ({c.get('type')})" for c in item.get('columns', [])]
-                        col_str = ", ".join(cols) # Gộp gọn
-                        
-                        # Nội dung để Index (Tìm kiếm)
-                        page_content = f"TABLE: {name}\nDESC: {desc}\nCOLS: {col_str}\nFULL_SCHEMA: {json.dumps(item, ensure_ascii=False)}"
-                        
-                        table_docs.append(Document(page_content=page_content, metadata={"source": name}))
+                        schema_parts.append(f"""
+[ROUTINE / FUNCTION]
+Name: `{name}`
+Description: {desc}
+DEFINITION (SOURCE SQL CODE):
+```sql
+{definition}
+```
+(AI NOTE: Hãy đọc kỹ code SQL trên. Nếu có CASE WHEN, dùng nó để map giá trị ID tương ứng)
+""")
 
         except Exception as e:
-            print(f"❌ Lỗi file {file_path}: {e}")
+            print(f"❌ Lỗi đọc file {file_path}: {e}")
 
-    # 1. Lưu Routines vào Global Context
-    if routine_texts:
-        GLOBAL_ROUTINES_CONTEXT = "\n====================\n".join(routine_texts)
-        print(f"✅ Đã nạp {len(routine_texts)} Routines vào Global Memory.")
-    else:
-        GLOBAL_ROUTINES_CONTEXT = "No routines found."
-
-    # 2. Tạo Bộ tìm kiếm Tables (Hybrid: Semantic + Keyword)
-    if table_docs:
-        print("⏳ Đang tạo Table Index...")
-        # Vector Search
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vectorstore = FAISS.from_documents(table_docs, embeddings)
-        VECTOR_RETRIEVER = vectorstore.as_retriever(search_kwargs={"k": 5})
-        
-        # Keyword Search
-        BM25_RETRIEVER = BM25Retriever.from_documents(table_docs)
-        BM25_RETRIEVER.k = 5
-        
-        print(f"✅ Table RAG sẵn sàng ({len(table_docs)} bảng).")
-    else:
-        print("⚠️ Không có bảng dữ liệu nào để Index.")
-
-def retrieve_tables(query):
-    """Tìm bảng liên quan bằng Hybrid Search (Manual Implementation)"""
-    if not VECTOR_RETRIEVER or not BM25_RETRIEVER: return ""
-    
-    # 1. Keyword Search (BM25) - Bắt từ khóa chính xác
-    docs_bm25 = BM25_RETRIEVER.invoke(query)
-    # 2. Vector Search (Semantic) - Bắt ý nghĩa tương đồng
-    docs_vector = VECTOR_RETRIEVER.invoke(query)
-    
-    # 3. Gộp kết quả và loại bỏ trùng lặp
-    seen = set()
-    unique_docs = []
-    
-    # Ưu tiên BM25 trước rồi đến Vector
-    for d in docs_bm25 + docs_vector:
-        if d.page_content not in seen:
-            seen.add(d.page_content)
-            unique_docs.append(d)
-    
-    return "\n---\n".join([d.page_content for d in unique_docs[:6]])
+    # Gộp tất cả lại thành 1 chuỗi văn bản lớn
+    GLOBAL_FULL_SCHEMA = "\n----------------------------------------\n".join(schema_parts)
+    print(f"✅ Đã nạp xong! Tổng dung lượng Context: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
 
 # --- KHỞI CHẠY ---
 init_db()
-init_advanced_rag()
+load_all_schemas()
 
 # =========================================================
-#  PHẦN 6: API ROUTES & PROMPT ENGINEERING
+#  PHẦN 5: API ROUTES
 # =========================================================
 
 @app.route('/')
@@ -214,8 +167,10 @@ def index(): return render_template('index.html')
 
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
-    sessions = Session.query.order_by(desc(Session.created_at)).all()
-    return jsonify([{'id': s.id, 'title': s.title, 'created_at': s.created_at} for s in sessions])
+    try:
+        sessions = Session.query.order_by(desc(Session.created_at)).all()
+        return jsonify([{'id': s.id, 'title': s.title, 'created_at': s.created_at} for s in sessions])
+    except: return jsonify([])
 
 @app.route('/api/history/<session_id>', methods=['GET'])
 def get_history(session_id):
@@ -234,6 +189,9 @@ def clear_history():
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
+    # Sử dụng biến toàn cục chứa toàn bộ schema
+    global GLOBAL_FULL_SCHEMA
+    
     data = request.json
     api_key = data.get('api_key') or DEFAULT_API_KEY
     user_msg = data.get('message')
@@ -245,51 +203,40 @@ def chat():
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
 
-        # 1. LẤY CONTEXT (Chiến lược: Global Logic + Retrieved Tables)
-        # Luôn lấy toàn bộ Logic hàm để đảm bảo hiểu CASE WHEN
-        logic_context = GLOBAL_ROUTINES_CONTEXT
-        # Chỉ lấy các Bảng liên quan để tiết kiệm token
-        data_context = retrieve_tables(user_msg)
-
-        if not data_context:
-            data_context = "Không tìm thấy bảng nào khớp với câu hỏi. Hãy tự suy luận dựa trên kiến thức SQL."
-
-        # 2. XÂY DỰNG PROMPT CHUYÊN SÂU
+        # 2. XÂY DỰNG PROMPT CAO CẤP (Chain-of-Thought)
+        # Ép AI phải suy luận logic từ Routine trước khi viết Code
         system_prompt = f"""Bạn là chuyên gia BigQuery SQL cao cấp.
 
-[CẤU TRÚC DỮ LIỆU ĐƯỢC CUNG CẤP]:
----
-[PHẦN 1: LOGIC NGHIỆP VỤ & MAPPING (BẮT BUỘC ĐỌC KỸ)]:
-{logic_context}
----
-[PHẦN 2: BẢNG DỮ LIỆU LIÊN QUAN (TRA CỨU CẤU TRÚC)]:
-{data_context}
----
+[DỮ LIỆU TOÀN CỤC CỦA HỆ THỐNG]:
+Dưới đây là TOÀN BỘ Bảng và Hàm (Routine) của hệ thống. Hãy đọc hết để hiểu ngữ cảnh:
 
-[NHIỆM VỤ]:
-Viết câu lệnh SQL Standard trả lời câu hỏi của user: "{user_msg}"
+{GLOBAL_FULL_SCHEMA}
 
-[QUY TẮC QUAN TRỌNG - BẮT BUỘC TUÂN THỦ]:
-1. **Logic Mapping (QUAN TRỌNG NHẤT):**
-   - Hãy tự đọc phần `[ROUTINE / FUNCTION]` ở trên.
-   - Tìm các mệnh đề `CASE WHEN` bên trong code SQL của routine để hiểu ý nghĩa các con số (ID).
-   - Ví dụ: Nếu thấy `WHEN status_id = 2 THEN 'New'`, và user hỏi về 'New', bạn PHẢI dùng `status_id = 2`.
-   - KHÔNG ĐƯỢC ĐOÁN MÒ. Nếu routine định nghĩa khác, hãy theo routine.
+[YÊU CẦU]:
+Viết câu lệnh SQL Standard trả lời câu hỏi: "{user_msg}"
 
-2. **Kỹ thuật BigQuery:**
+[QUY TRÌNH SUY LUẬN (BẮT BUỘC THỰC HIỆN TRONG ĐẦU)]:
+1. **Phân tích câu hỏi:** User đang hỏi về đối tượng nào?
+2. **Tra cứu Logic (QUAN TRỌNG NHẤT):**
+   - Tìm các `[ROUTINE]` có liên quan đến trạng thái hoặc loại hình (status, type...).
+   - Đọc kỹ code SQL bên trong routine (đặc biệt là mệnh đề `CASE WHEN`).
+    - Xác định giá trị ID tương ứng với mô tả user hỏi.
+   - KHÔNG ĐƯỢC ĐOÁN MÒ.
+3. **Viết SQL:**
    - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
    - ✅ Dùng JOIN (LEFT JOIN) kết hợp GROUP BY nếu cần.
    - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
 
-3. Chỉ trả về code SQL trong ```sql ... ```.
+[OUTPUT]:
+4. Chỉ trả về code SQL trong ```sql ... ```.
 
-4. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
+5. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
         
         # Thêm lịch sử (Bộ nhớ ngắn hạn)
-        history = get_chat_history_formatted(session_id, limit=8)
+        history = get_chat_history_formatted(session_id, limit=10)
         for msg in history:
             if msg['content'] != user_msg: messages_payload.append(msg)
         messages_payload.append({"role": "user", "content": user_msg})
@@ -300,8 +247,8 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user: "{user_msg}"
             model=MODEL_NAME, 
             messages=messages_payload, 
             stream=False, 
-            options={"temperature": 0.1} # Nhiệt độ thấp để chính xác
-        )
+            options={"temperature": 0.05} # Nhiệt độ cực thấp để đảm bảo chính xác logic
+        ) 
         
         reply = response['message']['content']
         save_message(session_id, "assistant", reply)
@@ -314,7 +261,7 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user: "{user_msg}"
 
 @app.route('/api/reload', methods=['POST'])
 def reload_schema():
-    init_advanced_rag()
+    load_all_schemas()
     return jsonify({"status": "success", "message": "Reloaded!"})
 
 if __name__ == '__main__':
