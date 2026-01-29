@@ -18,7 +18,7 @@ DB_FILE = "chat_history.db"
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
 # API Key (Ưu tiên lấy từ .env)
-DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
+DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY") 
 
 # BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
 # Hệ thống sẽ nạp 100% Bảng và Hàm vào đây để AI đọc mỗi lần chat
@@ -210,9 +210,11 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 2. **Kỹ thuật BigQuery:**
    - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
    - ✅ Dùng JOIN (LEFT JOIN) kết hợp GROUP BY nếu cần.
-   - Tên bảng phải đặt trong dấu backtick (`).
+   - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
 
 3. Chỉ trả về code SQL trong ```sql ... ```.
+
+4. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
@@ -255,5 +257,4 @@ def reload_schema():
     return jsonify({"status": "success", "message": "Đã nạp lại toàn bộ dữ liệu Schema!"})
 
 if __name__ == '__main__':
-
     app.run(debug=True, port=5000)
