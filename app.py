@@ -2,22 +2,39 @@ import os
 import json
 import glob
 import datetime
-import psycopg2
-import psycopg2.extras
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from ollama import Client
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import desc
+
+# =========================================================
+#  PHẦN 1: SETUP MÔI TRƯỜNG & CẤU HÌNH
+# =========================================================
+
+# Tắt cảnh báo token huggingface không cần thiết
+os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 
 # --- 1. SETUP MÔI TRƯỜNG ---
 load_dotenv()
 app = Flask(__name__)
+CORS(app)  # Bật CORS cho Frontend
+
+# Cấu hình Database (Tự động thích ứng SQLite/Postgres cho Render/Local)
+db_url = os.getenv("DATABASE_URL", "sqlite:///chat_history.db")
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
 
 # --- 2. CẤU HÌNH HỆ THỐNG ---
 SCHEMA_FOLDER = "./schemas"
-# Lấy URL kết nối DB từ biến môi trường (Render sẽ cung cấp biến DATABASE_URL)
-# Mặc định fallback về localhost nếu chạy local mà không có env
-DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Cấu hình AI Ollama
 # Cấu hình Ollama (Cloud hoặc Local)
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
@@ -29,106 +46,77 @@ DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 GLOBAL_FULL_SCHEMA = ""
 
 # =========================================================
-#  PHẦN 3: QUẢN LÝ DATABASE (POSTGRESQL) - LƯU LỊCH SỬ CHAT
+#  PHẦN 2: DATABASE MODELS (SQLAlchemy)
 # =========================================================
 
-def get_db_connection():
-    """Tạo kết nối đến PostgreSQL"""
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except Exception as e:
-        print(f"❌ Lỗi kết nối Database: {e}")
-        return None
+class Session(db.Model):
+    __tablename__ = 'sessions'
+    id = db.Column(db.String(50), primary_key=True)
+    title = db.Column(db.String(200))
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+class Message(db.Model):
+    __tablename__ = 'messages'
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(50), db.ForeignKey('sessions.id'), nullable=False)
+    role = db.Column(db.String(20), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+# =========================================================
+#  PHẦN 3: HÀM HỖ TRỢ DATABASE
+# =========================================================
 
 def init_db():
-    """Khởi tạo database PostgreSQL nếu chưa có bảng"""
-    conn = get_db_connection()
-    if not conn: return
-    
-    try:
-        cur = conn.cursor()
-        # Tạo bảng sessions
-        cur.execute('''CREATE TABLE IF NOT EXISTS sessions 
-                     (id TEXT PRIMARY KEY, title TEXT, created_at TIMESTAMP)''')
-        
-        # Tạo bảng messages (Dùng SERIAL cho id tự tăng trong Postgres)
-        cur.execute('''CREATE TABLE IF NOT EXISTS messages 
-                     (id SERIAL PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at TIMESTAMP)''')
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("✅ Đã khởi tạo Database thành công.")
-    except Exception as e:
-        print(f"❌ Lỗi khởi tạo Database: {e}")
-
-def get_chat_history_formatted(session_id, limit=10):
-    """Lấy lịch sử chat của một phiên cụ thể"""
-    conn = get_db_connection()
-    if not conn: return []
-    
-    # Sử dụng RealDictCursor để lấy dữ liệu dạng Dictionary
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    # Postgres dùng %s thay vì ? cho tham số
-    cur.execute("SELECT role, content FROM messages WHERE session_id = %s ORDER BY created_at DESC LIMIT %s", (session_id, limit))
-    rows = cur.fetchall()
-    
-    conn.close()
-    
-    history = []
-    # Đảo ngược để xếp theo thứ tự thời gian cũ -> mới (User hỏi -> AI trả lời)
-    for r in rows[::-1]:
-        history.append({"role": r["role"], "content": r["content"]})
-    return history
+    with app.app_context():
+        db.create_all()
+        print("✅ Database Connected (SQLite/PostgreSQL).")
 
 def save_message(session_id, role, content):
     """Lưu tin nhắn vào DB"""
-    conn = get_db_connection()
-    if not conn: return
-
     try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (%s, %s, %s, %s)", 
-                  (session_id, role, content, datetime.datetime.now()))
-        conn.commit()
-        conn.close()
+        new_msg = Message(session_id=session_id, role=role, content=content)
+        db.session.add(new_msg)
+        db.session.commit()
     except Exception as e:
-        print(f"Lỗi lưu tin nhắn: {e}")
+        print(f"Error saving message: {e}")
+        db.session.rollback()
 
 def create_session_if_not_exists(session_id, first_msg):
     """Tạo phiên chat mới nếu chưa tồn tại"""
-    conn = get_db_connection()
-    if not conn: return
-
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM sessions WHERE id = %s", (session_id,))
-        if not cur.fetchone():
-            # Lấy 50 ký tự đầu của tin nhắn làm tiêu đề
-            cur.execute("INSERT INTO sessions (id, title, created_at) VALUES (%s, %s, %s)", 
-                      (session_id, first_msg[:50], datetime.datetime.now()))
-            conn.commit()
-        conn.close()
+        session = Session.query.get(session_id)
+        if not session:
+            # Tạo title ngắn gọn từ tin nhắn đầu tiên
+            title = (first_msg[:50] + '...') if len(first_msg) > 50 else first_msg
+            db.session.add(Session(id=session_id, title=title))
+            db.session.commit()
     except Exception as e:
-        print(f"Lỗi tạo session: {e}")
+        print(f"Error creating session: {e}")
+        db.session.rollback()
+
+def get_chat_history_formatted(session_id, limit=10):
+    """Lấy lịch sử chat của một phiên cụ thể"""
+    try:
+        msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
+        history = []
+        # Đảo ngược lại để đúng thứ tự thời gian khi đưa vào Prompt
+        for m in msgs[::-1]:
+            history.append({"role": m.role, "content": m.content})
+        return history
+    except:
+        return []
 
 def delete_session_data(session_id):
     """Xóa toàn bộ lịch sử của một session"""
-    conn = get_db_connection()
-    if not conn: return False
-    
     try:
-        cur = conn.cursor()
-        # Xóa tin nhắn trước
-        cur.execute("DELETE FROM messages WHERE session_id = %s", (session_id,))
-        # Xóa session sau
-        cur.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
-        conn.commit()
-        conn.close()
+        Message.query.filter_by(session_id=session_id).delete()
+        Session.query.filter_by(id=session_id).delete()
+        db.session.commit()
         return True
     except Exception as e:
         print(f"Lỗi xóa session: {e}")
+        db.session.rollback()
         return False
 
 # =========================================================
@@ -223,17 +211,11 @@ def index():
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
     """API lấy danh sách các phiên chat"""
-    conn = get_db_connection()
-    if not conn: return jsonify([])
-    
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("SELECT * FROM sessions ORDER BY created_at DESC")
-    rows = cur.fetchall()
-    conn.close()
-    
-    # Convert datetime objects to string if needed implies standard JSON serialization handles it usually, 
-    # but strictly jsonify handles datetime objects well in newer Flask versions.
-    return jsonify([dict(r) for r in rows])
+    try:
+        sessions = Session.query.order_by(desc(Session.created_at)).all()
+        return jsonify([{'id': s.id, 'title': s.title, 'created_at': s.created_at} for s in sessions])
+    except:
+        return jsonify([])
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def delete_session_endpoint(session_id):
@@ -248,6 +230,17 @@ def delete_session_endpoint(session_id):
 def get_history(session_id): 
     """API lấy nội dung chat"""
     return jsonify(get_chat_history_formatted(session_id, limit=50))
+
+@app.route('/api/clear_history', methods=['POST'])
+def clear_history():
+    try:
+        Message.query.delete()
+        Session.query.delete()
+        db.session.commit()
+        return jsonify({"status": "success", "message": "Deleted all history."})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
