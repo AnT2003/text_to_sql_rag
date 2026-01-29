@@ -1,90 +1,95 @@
 import os
 import json
 import glob
-import sqlite3
 import datetime
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from ollama import Client
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import desc
 
 # --- 1. SETUP MÔI TRƯỜNG ---
 load_dotenv()
 app = Flask(__name__)
 
-# --- 2. CẤU HÌNH HỆ THỐNG ---
+# --- 2. CẤU HÌNH ---
 SCHEMA_FOLDER = "./schemas"
-DB_FILE = "chat_history.db"
-# Cấu hình Ollama (Cloud hoặc Local)
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
-# API Key (Ưu tiên lấy từ .env)
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY") 
 
-# BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
-# Hệ thống sẽ nạp 100% Bảng và Hàm vào đây để AI đọc mỗi lần chat
+# Cấu hình Database (Hỗ trợ cả SQLite và PostgreSQL trên Render)
+db_url = os.getenv("DATABASE_URL", "sqlite:///chat_history.db")
+# Fix lỗi nhỏ của Render (Render dùng postgres://, thư viện mới cần postgresql://)
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+# BIẾN TOÀN CỤC CHỨA SCHEMA
 GLOBAL_FULL_SCHEMA = ""
 
 # =========================================================
-#  PHẦN 3: QUẢN LÝ DATABASE (SQLITE) - LƯU LỊCH SỬ CHAT
+#  PHẦN 3: DATABASE MODELS (SQLAlchemy)
 # =========================================================
-def init_db():
-    """Khởi tạo database SQLite nếu chưa có"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS sessions 
-                 (id TEXT PRIMARY KEY, title TEXT, created_at DATETIME)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS messages 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME)''')
-    conn.commit()
-    conn.close()
+class Session(db.Model):
+    __tablename__ = 'sessions'
+    id = db.Column(db.String(50), primary_key=True)
+    title = db.Column(db.String(200))
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
-def get_chat_history_formatted(session_id, limit=10):
-    """Lấy lịch sử chat của một phiên cụ thể"""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?", (session_id, limit))
-    rows = c.fetchall()
-    conn.close()
-    
-    history = []
-    # Đảo ngược để xếp theo thứ tự thời gian cũ -> mới (User hỏi -> AI trả lời)
-    for r in rows[::-1]:
-        history.append({"role": r["role"], "content": r["content"]})
-    return history
+class Message(db.Model):
+    __tablename__ = 'messages'
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.String(50), db.ForeignKey('sessions.id'), nullable=False)
+    role = db.Column(db.String(20), nullable=False) # user / assistant
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
+# Khởi tạo DB
+def init_db():
+    with app.app_context():
+        db.create_all()
+        print("✅ Database đã được khởi tạo/kết nối.")
+
+# =========================================================
+#  PHẦN 4: LOGIC DATABASE HELPER
+# =========================================================
+def create_session_if_not_exists(session_id, first_msg):
+    # Kiểm tra xem session có chưa
+    session = Session.query.get(session_id)
+    if not session:
+        # Tạo tiêu đề từ 50 ký tự đầu
+        title = (first_msg[:50] + '...') if len(first_msg) > 50 else first_msg
+        new_session = Session(id=session_id, title=title)
+        db.session.add(new_session)
+        db.session.commit()
 
 def save_message(session_id, role, content):
-    """Lưu tin nhắn vào DB"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", 
-              (session_id, role, content, datetime.datetime.now()))
-    conn.commit()
-    conn.close()
+    new_msg = Message(session_id=session_id, role=role, content=content)
+    db.session.add(new_msg)
+    db.session.commit()
 
-def create_session_if_not_exists(session_id, first_msg):
-    """Tạo phiên chat mới nếu chưa tồn tại"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
-    if not c.fetchone():
-        # Lấy 50 ký tự đầu của tin nhắn làm tiêu đề
-        c.execute("INSERT INTO sessions (id, title, created_at) VALUES (?, ?, ?)", 
-                  (session_id, first_msg[:50], datetime.datetime.now()))
-        conn.commit()
-    conn.close()
+def get_chat_history_formatted(session_id, limit=10):
+    # Lấy tin nhắn mới nhất, sau đó đảo ngược lại
+    messages = Message.query.filter_by(session_id=session_id)\
+        .order_by(desc(Message.created_at))\
+        .limit(limit).all()
+    
+    history = []
+    for msg in messages[::-1]: # Đảo ngược thành cũ -> mới
+        history.append({"role": msg.role, "content": msg.content})
+    return history
 
 # =========================================================
-#  PHẦN 4: KỸ THUẬT FULL-CONTEXT LOADING (ĐỌC TOÀN BỘ)
+#  PHẦN 5: LOAD SCHEMA (FULL CONTEXT)
 # =========================================================
 def load_all_schemas():
-    """
-    Kỹ thuật Advanced: Đọc TẤT CẢ file trong thư mục schemas và gộp lại nguyên bản.
-    Không dùng Regex cắt gọt, để AI tự đọc Raw Data (DDL/Definition) để hiểu ngữ cảnh sâu nhất.
-    """
     global GLOBAL_FULL_SCHEMA
-    print("🚀 Đang nạp TOÀN BỘ Schemas vào bộ nhớ (Full Context)...")
-    
+    print("🚀 Đang nạp TOÀN BỘ Schemas vào bộ nhớ...")
     if not os.path.exists(SCHEMA_FOLDER): 
         print(f"⚠️ Không tìm thấy thư mục {SCHEMA_FOLDER}")
         return
@@ -97,103 +102,76 @@ def load_all_schemas():
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 items = data if isinstance(data, list) else [data]
-                
                 for item in items:
-                    # --- XỬ LÝ TABLE (BẢNG) ---
                     if 'table_name' in item:
                         name = item.get('table_name', 'Unknown')
-                        desc = item.get('description', '')
-                        # Format đơn giản: Tên cột (Kiểu dữ liệu)
                         cols = [f"- {c['name']} ({c.get('type')})" for c in item.get('columns', [])]
-                        col_str = "\n".join(cols)
-                        
-                        schema_parts.append(f"""
-[TABLE SCHEMA]
-Name: `{name}`
-Description: {desc}
-Columns:
-{col_str}
-""")
-                    
-                    # --- XỬ LÝ ROUTINE (HÀM - QUAN TRỌNG NHẤT) ---
+                        schema_parts.append(f"[TABLE SCHEMA]\nName: `{name}`\nColumns:\n{chr(10).join(cols)}")
                     elif 'routine_name' in item:
                         name = item.get('routine_name', 'Unknown')
-                        # Lấy code SQL gốc (quan trọng nhất để hiểu logic CASE WHEN)
-                        # Ưu tiên ddl, nếu không có thì lấy routine_definition
-                        definition = item.get('ddl') or item.get('routine_definition') or ''
-                        desc = item.get('description', '')
-                        
-                        schema_parts.append(f"""
-[ROUTINE / FUNCTION]
-Name: `{name}`
-Description: {desc}
-DEFINITION (SOURCE SQL CODE):
-```sql
-{definition}
-```
-(AI NOTE: Hãy đọc kỹ code SQL trên. Nếu có CASE WHEN, hãy dùng nó để map giá trị ID tương ứng)
-""")
-
+                        definition = item.get('routine_definition') or item.get('ddl') or ''
+                        schema_parts.append(f"[ROUTINE]\nName: `{name}`\nDEFINITION:\n```sql\n{definition}\n```")
         except Exception as e:
-            print(f"❌ Lỗi đọc file {file_path}: {e}")
+            print(f"❌ Lỗi file {file_path}: {e}")
 
-    # Gộp tất cả lại thành 1 chuỗi văn bản lớn
     GLOBAL_FULL_SCHEMA = "\n----------------------------------------\n".join(schema_parts)
-    print(f"✅ Đã nạp xong! Tổng dung lượng Context: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
+    print(f"✅ Đã nạp xong! Dung lượng: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
 
-# --- KHỞI CHẠY LẦN ĐẦU ---
-# Đảm bảo chạy khi file được import hoặc thực thi
+# --- KHỞI CHẠY ---
 init_db()
 load_all_schemas()
 
 # =========================================================
-#  PHẦN 5: API ROUTES & LOGIC CHAT
+#  PHẦN 6: API ROUTES
 # =========================================================
 
 @app.route('/')
-def index():
-    return render_template('index.html')
+def index(): return render_template('index.html')
 
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
-    """API lấy danh sách các phiên chat"""
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    rows = c.execute("SELECT * FROM sessions ORDER BY created_at DESC").fetchall()
-    conn.close()
-    return jsonify([dict(r) for r in rows])
+    # Lấy danh sách session giảm dần theo thời gian
+    sessions = Session.query.order_by(desc(Session.created_at)).all()
+    return jsonify([{'id': s.id, 'title': s.title, 'created_at': s.created_at} for s in sessions])
 
 @app.route('/api/history/<session_id>', methods=['GET'])
 def get_history(session_id): 
-    """API lấy nội dung chat"""
-    return jsonify(get_chat_history_formatted(session_id, limit=50))
+    # Lấy toàn bộ lịch sử (limit 100) để hiển thị UI
+    msgs = Message.query.filter_by(session_id=session_id).order_by(Message.created_at).limit(100).all()
+    return jsonify([{'role': m.role, 'content': m.content} for m in msgs])
+
+# --- API MỚI: XÓA LỊCH SỬ ---
+@app.route('/api/clear_history', methods=['POST'])
+def clear_history():
+    try:
+        # Xóa toàn bộ dữ liệu bảng messages và sessions
+        Message.query.delete()
+        Session.query.delete()
+        db.session.commit()
+        return jsonify({"status": "success", "message": "Đã xóa toàn bộ lịch sử chat!"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    # Sử dụng biến toàn cục chứa toàn bộ schema
     global GLOBAL_FULL_SCHEMA
-    
     data = request.json
     api_key = data.get('api_key') or DEFAULT_API_KEY
     user_msg = data.get('message')
     session_id = data.get('session_id')
 
-    if not api_key: return jsonify({"error": "Thiếu API Key"}), 401
-    if not session_id: return jsonify({"error": "Thiếu Session ID"}), 400
+    if not api_key or not session_id: return jsonify({"error": "Thiếu thông tin"}), 400
 
     try:
-        # 1. Lưu Session và Tin nhắn User
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
 
-        # 2. XÂY DỰNG PROMPT CAO CẤP (Đưa toàn bộ Schema vào)
-        # Đây là kỹ thuật "In-Context Learning": Dạy AI bằng chính dữ liệu của bạn ngay trong prompt.
+        # Prompt Full Context
         system_prompt = f"""Bạn là một chuyên gia BigQuery SQL cao cấp.
 
 [DỮ LIỆU CỦA HỆ THỐNG]:
-Dưới đây là toàn bộ Bảng và Hàm (Routine) bạn có quyền truy cập. 
-HÃY ĐỌC KỸ TOÀN BỘ ĐỂ HIỂU LOGIC DỮ LIỆU:
+Dưới đây là toàn bộ Bảng và Hàm (Routine). Bạn có quyền truy cập tất cả:
 
 {GLOBAL_FULL_SCHEMA}
 
@@ -216,45 +194,32 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 
 4. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
-
         messages_payload = [{"role": "system", "content": system_prompt}]
         
-        # Thêm lịch sử chat gần nhất để AI nhớ ngữ cảnh
-        history = get_chat_history_formatted(session_id, limit=10)
+        # Thêm lịch sử chat gần nhất (bộ nhớ ngắn hạn)
+        history = get_chat_history_formatted(session_id, limit=6)
         for msg in history:
             if msg['content'] != user_msg: 
                 messages_payload.append(msg)
         
-        # Thêm câu hỏi hiện tại
         messages_payload.append({"role": "user", "content": user_msg})
 
-        # 3. Gọi AI
         client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
-        
-        # Temperature = 0.1: Giữ cho AI đủ sáng tạo để viết SQL nhưng vẫn tuân thủ dữ liệu
-        response = client.chat(
-            model=MODEL_NAME, 
-            messages=messages_payload, 
-            stream=False, 
-            options={"temperature": 0.1}
-        )
+        response = client.chat(model=MODEL_NAME, messages=messages_payload, stream=False, options={"temperature": 0.1}) 
         
         ai_reply = response['message']['content']
-        
-        # 4. Lưu câu trả lời của AI
         save_message(session_id, "assistant", ai_reply)
 
         return jsonify({"response": ai_reply})
 
     except Exception as e:
-        print(f"Lỗi Server: {e}")
+        print(f"Lỗi: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/reload', methods=['POST'])
 def reload_schema():
-    """API để nạp lại dữ liệu khi bạn sửa file JSON"""
     load_all_schemas()
-    return jsonify({"status": "success", "message": "Đã nạp lại toàn bộ dữ liệu Schema!"})
+    return jsonify({"status": "success", "message": "Reloaded!"})
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
