@@ -124,10 +124,9 @@
             const container = document.getElementById('sessionList');
             try {
                 const res = await fetch(`${API_BASE}/api/sessions`);
+                // Nếu server trả về lỗi (như 500), throw error để hiển thị
                 if (!res.ok) {
-                     // Nếu Server trả về lỗi (500), coi như vẫn kết nối được nhưng Server đang lỗi
-                     // Không switch sang offline mode ngay, để user thấy lỗi trong chat
-                     throw new Error(`Server Error: ${res.status}`);
+                     throw new Error(`Server Error: ${res.status} ${res.statusText}`);
                 }
                 
                 const sessions = await res.json();
@@ -136,7 +135,7 @@
             } catch (e) { 
                 console.warn("Session load failed:", e);
                 // Chỉ switch sang offline nếu là lỗi mạng (Failed to fetch)
-                if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+                if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError') || e.message.includes('Network request failed')) {
                      updateConnectionStatus(false);
                      const mockSessions = [
                         { id: 'mock-1', title: 'Phân tích doanh thu tháng 10 (Demo)' },
@@ -144,8 +143,8 @@
                     ];
                     renderSessionList(mockSessions);
                 } else {
-                    // Lỗi server 500 thì vẫn giữ status online nhưng báo lỗi
-                    container.innerHTML = `<div class="p-3 text-red-400 text-xs text-center">Lỗi Server: ${e.message}</div>`;
+                    // Lỗi server (500, 404, etc) thì báo lỗi cụ thể
+                    container.innerHTML = `<div class="p-3 text-red-400 text-xs text-center border border-red-800 rounded mx-2 bg-red-900/20">Lỗi: ${e.message}</div>`;
                 }
             }
         }
@@ -169,7 +168,8 @@
         }
 
         async function loadChatHistory(sessionId, title) {
-            if (isOfflineMode) return;
+            // Cho phép load lại kể cả khi đang offline để retry
+            // if (isOfflineMode) return; 
             
             currentSessionId = sessionId;
             document.getElementById('chatTitle').innerText = "💬 " + title;
@@ -209,16 +209,9 @@
             input.value = '';
             const loadingId = appendMessage('bot', '...', true);
 
-            // Nếu đang offline (không chạy server python), trả lời giả lập
-            if (isOfflineMode) {
-                setTimeout(() => {
-                    document.getElementById(loadingId).remove();
-                    const mockReply = `⚠️ **Backend chưa chạy!**\n\nĐây là câu trả lời giả lập. Để AI hoạt động thực sự, hãy chạy lệnh:\n\`\`\`bash\npython app.py\n\`\`\`\n\nSQL giả lập cho câu hỏi "${text}":\n\`\`\`sql\nSELECT * FROM demo_table WHERE query = '${text}';\n\`\`\``;
-                    appendMessage('bot', mockReply);
-                }, 1000);
-                return;
-            }
-
+            // BỎ CHECK isOfflineMode Ở ĐÂY để luôn thử gọi API thật
+            // Nếu gọi thất bại, catch block bên dưới sẽ xử lý
+            
             try {
                 const res = await fetch(`${API_BASE}/api/chat`, {
                     method: 'POST',
@@ -229,23 +222,27 @@
                     })
                 });
                 
+                // Nếu thành công (có thể trước đó offline), chuyển lại sang online
+                if (res.ok && isOfflineMode) {
+                    updateConnectionStatus(true);
+                }
+
                 // Cố gắng đọc JSON lỗi từ server nếu có
                 let data;
                 try {
                     data = await res.json();
                 } catch (jsonErr) {
-                    // Nếu không phải JSON (VD: lỗi 500 từ Web Server trả HTML), tự tạo object lỗi
                     data = { error: `Server Error ${res.status}: ${res.statusText}` };
                 }
 
                 document.getElementById(loadingId).remove();
 
                 if (!res.ok) {
-                    // Lỗi 4xx hoặc 5xx từ Server -> HIỂN THỊ LỖI, KHÔNG CHUYỂN SANG DEMO
+                    // Lỗi từ Server trả về (VD: 500, 400) -> HIỂN THỊ CHI TIẾT
                     console.error("Server Error Response:", data);
-                    appendMessage('bot', `❌ **Lỗi Server (${res.status}):**\n\`${data.error || JSON.stringify(data)}\`\n\n_(Server vẫn kết nối nhưng gặp lỗi xử lý)_`);
+                    appendMessage('bot', `❌ **Lỗi Server (${res.status}):**\n\`${data.error || JSON.stringify(data)}\``);
                 } else {
-                    // Thành công 200
+                    // Thành công
                     if (data.error) {
                          appendMessage('bot', '❌ Lỗi: ' + data.error);
                     } else {
@@ -254,15 +251,16 @@
                     }
                 }
             } catch (e) {
-                // Chỉ khi lỗi mạng (Network Error / Failed to fetch) mới chuyển sang chế độ Demo
+                // Chỉ khi lỗi mạng (Network Error / Failed to fetch) mới hiển thị thông báo offline/demo
                 document.getElementById(loadingId).remove();
                 console.error("Network Error:", e);
                 
                 if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
                     updateConnectionStatus(false);
-                    appendMessage('bot', `❌ **Mất kết nối Server:**\nServer không phản hồi. Vui lòng kiểm tra terminal.\n\n_Chuyển sang chế độ Demo..._`);
+                    const mockReply = `⚠️ **Kết nối thất bại!**\n\nKhông thể gọi API Backend. Vui lòng kiểm tra:\n1. Server Python đã chạy chưa? (\`python app.py\`)\n2. Server có đang bị lỗi và crash không?\n\n_Giả lập câu trả lời demo:_\n\`\`\`sql\nSELECT * FROM demo WHERE id = 1;\n\`\`\``;
+                    appendMessage('bot', mockReply);
                 } else {
-                    // Lỗi khác (Javascript error)
+                    // Các lỗi khác (Javascript logic)
                     appendMessage('bot', `❌ **Lỗi Client:**\n\`${e.message}\``);
                 }
             }
