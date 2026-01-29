@@ -14,25 +14,24 @@ app = Flask(__name__)
 # --- 2. CẤU HÌNH HỆ THỐNG ---
 SCHEMA_FOLDER = "./schemas"
 DB_FILE = "chat_history.db"
-# Cấu hình Ollama (Cloud hoặc Local)
+# Cấu hình Ollama
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
-# API Key (Ưu tiên lấy từ .env)
+# API Key
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY") 
 
-# BIẾN TOÀN CỤC: 
-# Thay vì lưu 1 chuỗi string khổng lồ, ta lưu dạng danh sách để tìm kiếm
-GLOBAL_SCHEMA_DOCS = []  # Chứa chi tiết từng bảng/hàm
-GLOBAL_TABLE_NAMES = []  # Chứa danh sách tên rút gọn
-
-# Giới hạn Token an toàn (ước lượng ký tự) để không bị lỗi 400
-MAX_CONTEXT_CHARS = 50000 
+# BIẾN TOÀN CỤC CHỨA DỮ LIỆU
+# 1. Store: Chứa full nội dung (DDL, Logic) để lấy ra khi cần (Map: Name -> Content)
+GLOBAL_SCHEMA_STORE = {} 
+# 2. Index: Chứa danh sách TÊN + Tóm tắt nhẹ để AI quét nhanh (String)
+GLOBAL_SCHEMA_INDEX = ""
+# 3. List Names: Danh sách tên để đối chiếu
+GLOBAL_ALL_NAMES = []
 
 # =========================================================
-#  PHẦN 3: QUẢN LÝ DATABASE (SQLITE) - LƯU LỊCH SỬ CHAT
+#  PHẦN 3: QUẢN LÝ DATABASE (SQLITE)
 # =========================================================
 def init_db():
-    """Khởi tạo database SQLite nếu chưa có"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS sessions 
@@ -43,22 +42,18 @@ def init_db():
     conn.close()
 
 def get_chat_history_formatted(session_id, limit=10):
-    """Lấy lịch sử chat của một phiên cụ thể"""
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
     c.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?", (session_id, limit))
     rows = c.fetchall()
     conn.close()
-    
     history = []
-    # Đảo ngược để xếp theo thứ tự thời gian cũ -> mới (User hỏi -> AI trả lời)
     for r in rows[::-1]:
         history.append({"role": r["role"], "content": r["content"]})
     return history
 
 def save_message(session_id, role, content):
-    """Lưu tin nhắn vào DB"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", 
@@ -67,30 +62,30 @@ def save_message(session_id, role, content):
     conn.close()
 
 def create_session_if_not_exists(session_id, first_msg):
-    """Tạo phiên chat mới nếu chưa tồn tại"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
     if not c.fetchone():
-        # Lấy 50 ký tự đầu của tin nhắn làm tiêu đề
         c.execute("INSERT INTO sessions (id, title, created_at) VALUES (?, ?, ?)", 
                   (session_id, first_msg[:50], datetime.datetime.now()))
         conn.commit()
     conn.close()
 
 # =========================================================
-#  PHẦN 4: KỸ THUẬT RAG & LOADING
+#  PHẦN 4: KỸ THUẬT RAG 2 BƯỚC (SMART LOADING)
 # =========================================================
 def load_all_schemas():
     """
-    Load schemas vào bộ nhớ nhưng chia nhỏ thành list để tìm kiếm (Retrieval)
-    thay vì gộp tất cả thành 1 cục text khổng lồ.
+    Nạp dữ liệu theo 2 tầng:
+    1. Tầng Index (Nhẹ): Để AI quét chọn lọc.
+    2. Tầng Store (Nặng): Chứa nội dung chi tiết.
     """
-    global GLOBAL_SCHEMA_DOCS, GLOBAL_TABLE_NAMES
-    GLOBAL_SCHEMA_DOCS = []
-    GLOBAL_TABLE_NAMES = []
+    global GLOBAL_SCHEMA_STORE, GLOBAL_SCHEMA_INDEX, GLOBAL_ALL_NAMES
+    GLOBAL_SCHEMA_STORE = {}
+    GLOBAL_ALL_NAMES = []
+    index_lines = []
     
-    print("🚀 Đang nạp Schemas vào bộ nhớ (Indexing mode)...")
+    print("🚀 Đang nạp Schemas (Two-Stage RAG Mode)...")
     
     if not os.path.exists(SCHEMA_FOLDER): 
         print(f"⚠️ Không tìm thấy thư mục {SCHEMA_FOLDER}")
@@ -105,43 +100,34 @@ def load_all_schemas():
                 items = data if isinstance(data, list) else [data]
                 
                 for item in items:
-                    doc_content = ""
-                    search_text = ""
-                    doc_name = ""
-                    
-                    # --- XỬ LÝ TABLE ---
+                    name = ""
+                    full_content = ""
+                    summary = ""
+
+                    # --- TABLE ---
                     if 'table_name' in item:
                         name = item.get('table_name', 'Unknown')
                         ddl = item.get('ddl', '')
-                        doc_name = name
-                        GLOBAL_TABLE_NAMES.append(name)
                         
-                        doc_content = f"""
-[TABLE SCHEMA]
-Name: `{name}`
-DDL:
-```sql
-{ddl}
-```
-"""
-                        # Text dùng để search keyword
-                        search_text = (name + " " + ddl).lower()
-                    
-                    # --- XỬ LÝ ROUTINE ---
+                        # Full content (cho Bước 2)
+                        full_content = f"[TABLE] Name: `{name}`\nDDL:\n```sql\n{ddl}\n```"
+                        
+                        # Summary (cho Bước 1 - chỉ cần tên bảng để tiết kiệm token)
+                        summary = f"- TABLE: {name}"
+
+                    # --- ROUTINE ---
                     elif 'routine_name' in item:
                         name = item.get('routine_name', 'Unknown')
                         routine_def = item.get('routine_definition', '')
                         ddl = item.get('ddl', '')
                         arguments = item.get('arguments', [])
-                        doc_name = name
                         
-                        args_str = json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, (list, dict)) else str(arguments)
-                        
-                        doc_content = f"""
-[ROUTINE / FUNCTION]
-Name: `{name}`
+                        # Full content (cho Bước 2 - Đầy đủ logic)
+                        args_str = json.dumps(arguments, ensure_ascii=False)
+                        full_content = f"""
+[ROUTINE] Name: `{name}`
 Arguments: {args_str}
-Routine Definition:
+Definition:
 ```sql
 {routine_def}
 ```
@@ -149,69 +135,24 @@ DDL:
 ```sql
 {ddl}
 ```
-(AI NOTE: Hãy đọc kỹ code SQL trên. Nếu có CASE WHEN, hãy dùng nó để map giá trị ID tương ứng)
 """
-                        # Text dùng để search keyword
-                        search_text = (name + " " + routine_def + " " + ddl).lower()
+                        # Summary (cho Bước 1)
+                        summary = f"- ROUTINE: {name}"
 
-                    if doc_content:
-                        GLOBAL_SCHEMA_DOCS.append({
-                            "name": doc_name,
-                            "content": doc_content,
-                            "search_text": search_text
-                        })
+                    if name and full_content:
+                        GLOBAL_SCHEMA_STORE[name] = full_content
+                        GLOBAL_ALL_NAMES.append(name)
+                        index_lines.append(summary)
 
         except Exception as e:
             print(f"❌ Lỗi đọc file {file_path}: {e}")
 
-    print(f"✅ Đã index xong {len(GLOBAL_SCHEMA_DOCS)} đối tượng schema.")
-
-def get_relevant_schemas(user_msg):
-    """
-    Hàm tìm kiếm thông minh: Chỉ lấy những Schema có liên quan đến câu hỏi.
-    Giải quyết vấn đề 'Prompt too long'.
-    """
-    if not GLOBAL_SCHEMA_DOCS:
-        return "No schema data loaded."
-    
-    query_tokens = user_msg.lower().split()
-    scored_docs = []
-    
-    # 1. Chấm điểm sự liên quan
-    for doc in GLOBAL_SCHEMA_DOCS:
-        score = 0
-        for token in query_tokens:
-            # Nếu từ khóa xuất hiện trong tên bảng hoặc nội dung DDL -> tăng điểm
-            if token in doc['search_text']:
-                score += 1
-        scored_docs.append((score, doc))
-    
-    # 2. Sắp xếp: Điểm cao lên đầu
-    scored_docs.sort(key=lambda x: x[0], reverse=True)
-    
-    # 3. Chọn lọc: Lấy top docs sao cho không quá giới hạn ký tự
-    selected_contents = []
-    current_chars = 0
-    
-    # Luôn lấy ít nhất top 5 bảng liên quan nhất, hoặc nhiều hơn nếu còn dư chỗ
-    for score, doc in scored_docs:
-        # Lấy những bảng có match keyword (score > 0) 
-        # Hoặc lấy tối thiểu 3 bảng đầu tiên nếu không match gì cả (để AI không bị mù)
-        if score > 0 or len(selected_contents) < 3:
-            if current_chars + len(doc['content']) < MAX_CONTEXT_CHARS:
-                selected_contents.append(doc['content'])
-                current_chars += len(doc['content'])
-            else:
-                break # Đã đầy bộ nhớ context cho phép
-    
-    return "\n----------------------------------------\n".join(selected_contents)
-
-# --- KHỞI CHẠY LẦN ĐẦU ---
-init_db()
-load_all_schemas()
+    # Tạo Index String
+    GLOBAL_SCHEMA_INDEX = "\n".join(index_lines)
+    print(f"✅ Đã nạp {len(GLOBAL_ALL_NAMES)} đối tượng vào Index.")
 
 # =========================================================
-#  PHẦN 5: API ROUTES & LOGIC CHAT
+#  PHẦN 5: API ROUTES & LOGIC CHAT (QUAN TRỌNG)
 # =========================================================
 
 @app.route('/')
@@ -231,11 +172,54 @@ def get_sessions():
 def get_history(session_id): 
     return jsonify(get_chat_history_formatted(session_id, limit=50))
 
+def ai_select_relevant_schemas(client, user_msg):
+    """
+    BƯỚC 1: Gửi danh sách toàn bộ tên bảng/hàm cho AI.
+    Yêu cầu AI chọn ra những cái tên liên quan nhất.
+    """
+    if not GLOBAL_SCHEMA_INDEX:
+        return []
+
+    # Prompt đặc biệt để chọn lọc
+    selection_prompt = f"""Bạn là trợ lý dữ liệu thông minh.
+Nhiệm vụ: Dựa vào câu hỏi của người dùng, hãy xác định những Table hoặc Routine nào cần thiết để trả lời.
+
+DANH SÁCH TOÀN BỘ TABLE VÀ ROUTINE HIỆN CÓ:
+{GLOBAL_SCHEMA_INDEX}
+
+CÂU HỎI NGƯỜI DÙNG: "{user_msg}"
+
+YÊU CẦU TRẢ VỀ:
+- Chỉ liệt kê tên chính xác của các bảng/hàm liên quan.
+- Không giải thích gì thêm.
+- Nếu cần thiết, hãy chọn dư còn hơn bỏ sót.
+"""
+    
+    try:
+        response = client.chat(
+            model=MODEL_NAME, 
+            messages=[{"role": "user", "content": selection_prompt}], 
+            stream=False,
+            options={"temperature": 0.0} # Temp thấp để chính xác
+        )
+        ai_response_text = response['message']['content']
+        
+        # Logic phân tích phản hồi của AI để lấy ra list tên
+        # Cách đơn giản và hiệu quả nhất: Quét xem tên nào trong Database có xuất hiện trong câu trả lời của AI
+        selected_names = []
+        for name in GLOBAL_ALL_NAMES:
+            if name in ai_response_text:
+                selected_names.append(name)
+        
+        print(f"🔍 AI đã chọn {len(selected_names)} schemas liên quan: {selected_names}")
+        return selected_names
+        
+    except Exception as e:
+        print(f"⚠️ Lỗi bước chọn lọc: {e}")
+        return []
+
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    # Sử dụng biến toàn cục
-    global GLOBAL_TABLE_NAMES
-    
     data = request.json
     api_key = data.get('api_key') or DEFAULT_API_KEY
     user_msg = data.get('message')
@@ -245,24 +229,54 @@ def chat():
     if not session_id: return jsonify({"error": "Thiếu Session ID"}), 400
 
     try:
-        # 1. Lưu Session và Tin nhắn User
+        client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
+        
+        # 1. Lưu tin nhắn User
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
 
-        # 2. LẤY CONTEXT LIÊN QUAN (RAG)
-        # Thay vì đưa toàn bộ, chỉ đưa những gì cần thiết
-        relevant_schema_context = get_relevant_schemas(user_msg)
-        all_tables_list = ", ".join(GLOBAL_TABLE_NAMES)
+        # -------------------------------------------------------------
+        # BƯỚC 1: AI QUÉT TOÀN BỘ INDEX ĐỂ CHỌN SCHEMA (RAG STAGE 1)
+        # -------------------------------------------------------------
+        # Thay vì search keyword, ta hỏi thẳng AI
+        selected_schema_names = ai_select_relevant_schemas(client, user_msg)
+        
+        # Fallback: Nếu AI không chọn được gì (hoặc lỗi), ta dùng cơ chế keyword search "thô" để vớt vát
+        if not selected_schema_names:
+            print("⚠️ AI không chọn được bảng nào, chuyển sang chế độ dự phòng (keyword match)...")
+            query_tokens = user_msg.lower().split()
+            for name in GLOBAL_ALL_NAMES:
+                if any(token in name.lower() for token in query_tokens):
+                    selected_schema_names.append(name)
+        
+        # -------------------------------------------------------------
+        # BƯỚC 2: LOAD FULL CONTEXT CHO NHỮNG MỤC ĐÃ CHỌN (RAG STAGE 2)
+        # -------------------------------------------------------------
+        context_parts = []
+        current_chars = 0
+        MAX_CHARS = 100000 # Giới hạn an toàn cho bước tạo code
+        
+        # Luôn ưu tiên những bảng AI đã chọn
+        unique_names = list(set(selected_schema_names))
+        
+        for name in unique_names:
+            content = GLOBAL_SCHEMA_STORE.get(name, "")
+            if len(context_parts) == 0 or (current_chars + len(content) < MAX_CHARS):
+                context_parts.append(content)
+                current_chars += len(content)
+        
+        final_context = "\n--------------------\n".join(context_parts)
 
-        # 3. XÂY DỰNG PROMPT
-        system_prompt = f"""Bạn là một chuyên gia BigQuery SQL cao cấp.
+        # -------------------------------------------------------------
+        # BƯỚC 3: TẠO SQL VỚI FULL CONTEXT ĐÃ CHỌN LỌC
+        # -------------------------------------------------------------
+        system_prompt = f"""Bạn là chuyên gia BigQuery SQL.
 
-[DANH SÁCH TOÀN BỘ CÁC BẢNG HIỆN CÓ]:
-{all_tables_list}
+[NGỮ CẢNH DỮ LIỆU ĐÃ ĐƯỢC CHỌN LỌC KỸ]:
+Dưới đây là DDL và Logic chi tiết của các Bảng/Routine liên quan trực tiếp đến câu hỏi.
+(Đã được lọc từ toàn bộ Database để đảm bảo độ chính xác cao nhất)
 
-[CHI TIẾT SCHEMA & HÀM LIÊN QUAN ĐẾN CÂU HỎI]:
-(Hệ thống đã tự động lọc bớt các bảng không liên quan để tối ưu bộ nhớ)
-{relevant_schema_context}
+{final_context}
 
 [YÊU CẦU]:
 Viết câu lệnh SQL Standard trả lời câu hỏi của user.
@@ -283,20 +297,18 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 
 4. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
-
+        
         messages_payload = [{"role": "system", "content": system_prompt}]
         
         # Thêm lịch sử chat
-        history = get_chat_history_formatted(session_id, limit=10)
+        history = get_chat_history_formatted(session_id, limit=5)
         for msg in history:
-            if msg['content'] != user_msg: 
+            if msg['content'] != user_msg:
                 messages_payload.append(msg)
         
         messages_payload.append({"role": "user", "content": user_msg})
 
-        # 4. Gọi AI
-        client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
-        
+        # Gọi AI để viết Code
         response = client.chat(
             model=MODEL_NAME, 
             messages=messages_payload, 
@@ -316,8 +328,10 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 @app.route('/api/reload', methods=['POST'])
 def reload_schema():
     load_all_schemas()
-    return jsonify({"status": "success", "message": "Đã nạp lại và index dữ liệu Schema!"})
+    return jsonify({"status": "success", "message": "Đã nạp lại dữ liệu (Mode: Two-Stage RAG)!"})
 
 if __name__ == '__main__':
+    # Init DB & Load Schema
+    init_db()
+    load_all_schemas()
     app.run(debug=True, port=5000)
-
