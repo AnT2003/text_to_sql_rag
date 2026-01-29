@@ -6,9 +6,3 @@ requests
 flask-sqlalchemy
 psycopg2-binary
 flask-cors
-langchain
-langchain-huggingface
-langchain-community
-faiss-cpu
-rank_bm25
-
