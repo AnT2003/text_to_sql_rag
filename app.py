@@ -1,9 +1,8 @@
 import os
 import json
 import glob
+import sqlite3
 import datetime
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from ollama import Client
@@ -14,128 +13,84 @@ app = Flask(__name__)
 
 # --- 2. CẤU HÌNH HỆ THỐNG ---
 SCHEMA_FOLDER = "./schemas"
-
-# Cấu hình Database (PostgreSQL) - Lấy từ biến môi trường
-# Trên Render/Heroku, biến này sẽ tự động được cung cấp
-DATABASE_URL = os.getenv("DATABASE_URL")
-
+DB_FILE = "chat_history.db"
 # Cấu hình Ollama (Cloud hoặc Local)
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
 # API Key (Ưu tiên lấy từ .env)
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY") 
 
-# BIẾN TOÀN CỤC: Chứa danh sách các Documents (Chunks) để làm RAG
-GLOBAL_SCHEMA_DOCS = []
+# BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
+# Hệ thống sẽ nạp 100% Bảng và Hàm vào đây để AI đọc mỗi lần chat
+GLOBAL_FULL_SCHEMA = ""
 
 # =========================================================
-#  PHẦN 3: QUẢN LÝ DATABASE (POSTGRESQL) - LƯU LỊCH SỬ CHAT
+#  PHẦN 3: QUẢN LÝ DATABASE (SQLITE) - LƯU LỊCH SỬ CHAT
 # =========================================================
-def get_db_connection():
-    """Tạo kết nối đến PostgreSQL"""
-    if not DATABASE_URL:
-        print("❌ Lỗi: Chưa cấu hình DATABASE_URL trong .env hoặc biến môi trường!")
-        return None
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except Exception as e:
-        print(f"❌ Lỗi kết nối Database: {e}")
-        return None
-
 def init_db():
-    """Khởi tạo database PostgreSQL nếu chưa có bảng"""
-    conn = get_db_connection()
-    if not conn: return
-
-    try:
-        cur = conn.cursor()
-        # Tạo bảng sessions
-        cur.execute('''CREATE TABLE IF NOT EXISTS sessions 
-                     (id TEXT PRIMARY KEY, title TEXT, created_at TIMESTAMP)''')
-        
-        # Tạo bảng messages (Dùng SERIAL cho id tự tăng trong Postgres)
-        cur.execute('''CREATE TABLE IF NOT EXISTS messages 
-                     (id SERIAL PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at TIMESTAMP)''')
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("✅ Đã khởi tạo Database PostgreSQL thành công.")
-    except Exception as e:
-        print(f"❌ Lỗi khởi tạo Database: {e}")
+    """Khởi tạo database SQLite nếu chưa có"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS sessions 
+                 (id TEXT PRIMARY KEY, title TEXT, created_at DATETIME)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS messages 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, created_at DATETIME)''')
+    conn.commit()
+    conn.close()
 
 def get_chat_history_formatted(session_id, limit=10):
     """Lấy lịch sử chat của một phiên cụ thể"""
-    conn = get_db_connection()
-    if not conn: return []
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC LIMIT ?", (session_id, limit))
+    rows = c.fetchall()
+    conn.close()
     
-    try:
-        # Sử dụng RealDictCursor để lấy dữ liệu dạng Dictionary
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        # Postgres dùng %s thay vì ? cho tham số
-        cur.execute("SELECT role, content FROM messages WHERE session_id = %s ORDER BY created_at DESC LIMIT %s", (session_id, limit))
-        rows = cur.fetchall()
-        
-        conn.close()
-        
-        history = []
-        # Đảo ngược để xếp theo thứ tự thời gian cũ -> mới
-        for r in rows[::-1]:
-            history.append({"role": r["role"], "content": r["content"]})
-        return history
-    except Exception as e:
-        print(f"Lỗi lấy lịch sử: {e}")
-        return []
+    history = []
+    # Đảo ngược để xếp theo thứ tự thời gian cũ -> mới (User hỏi -> AI trả lời)
+    for r in rows[::-1]:
+        history.append({"role": r["role"], "content": r["content"]})
+    return history
 
 def save_message(session_id, role, content):
     """Lưu tin nhắn vào DB"""
-    conn = get_db_connection()
-    if not conn: return
-
-    try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (%s, %s, %s, %s)", 
-                  (session_id, role, content, datetime.datetime.now()))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Lỗi lưu tin nhắn: {e}")
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)", 
+              (session_id, role, content, datetime.datetime.now()))
+    conn.commit()
+    conn.close()
 
 def create_session_if_not_exists(session_id, first_msg):
     """Tạo phiên chat mới nếu chưa tồn tại"""
-    conn = get_db_connection()
-    if not conn: return
-
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM sessions WHERE id = %s", (session_id,))
-        if not cur.fetchone():
-            # Lấy 50 ký tự đầu của tin nhắn làm tiêu đề
-            cur.execute("INSERT INTO sessions (id, title, created_at) VALUES (%s, %s, %s)", 
-                      (session_id, first_msg[:50], datetime.datetime.now()))
-            conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Lỗi tạo session: {e}")
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
+    if not c.fetchone():
+        # Lấy 50 ký tự đầu của tin nhắn làm tiêu đề
+        c.execute("INSERT INTO sessions (id, title, created_at) VALUES (?, ?, ?)", 
+                  (session_id, first_msg[:50], datetime.datetime.now()))
+        conn.commit()
+    conn.close()
 
 # =========================================================
-#  PHẦN 4: KỸ THUẬT RAG (RETRIEVAL AUGMENTED GENERATION)
+#  PHẦN 4: KỸ THUẬT FULL-CONTEXT LOADING (ĐỌC TOÀN BỘ)
 # =========================================================
 def load_all_schemas():
     """
-    Kỹ thuật Advanced: Đọc TẤT CẢ file schemas và Indexing cho RAG.
-    Thay vì gộp thành 1 chuỗi, ta lưu thành từng mảnh (document) để tìm kiếm.
+    Kỹ thuật Advanced: Đọc TẤT CẢ file trong thư mục schemas và gộp lại nguyên bản.
+    Không dùng Regex cắt gọt, để AI tự đọc Raw Data (DDL/Definition) để hiểu ngữ cảnh sâu nhất.
     """
-    global GLOBAL_SCHEMA_DOCS
-    print("🚀 Đang nạp Schemas và Indexing cho RAG...")
+    global GLOBAL_FULL_SCHEMA
+    print("🚀 Đang nạp TOÀN BỘ Schemas vào bộ nhớ (Full Context)...")
     
     if not os.path.exists(SCHEMA_FOLDER): 
         print(f"⚠️ Không tìm thấy thư mục {SCHEMA_FOLDER}")
         return
 
     json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
-    GLOBAL_SCHEMA_DOCS = [] # Reset list
+    schema_parts = []
     
     for file_path in json_files:
         try:
@@ -145,101 +100,52 @@ def load_all_schemas():
                 
                 for item in items:
                     # --- XỬ LÝ TABLE (BẢNG) ---
+                    # Chỉ lấy name và ddl theo yêu cầu
                     if 'table_name' in item:
                         name = item.get('table_name', 'Unknown')
                         ddl = item.get('ddl', '')
                         
-                        doc_content = f"""
+                        schema_parts.append(f"""
 [TABLE SCHEMA]
 Name: `{name}`
 DDL:
 ```sql
 {ddl}
 ```
-"""
-                        GLOBAL_SCHEMA_DOCS.append({
-                            "name": name,
-                            "type": "TABLE",
-                            "content": doc_content,
-                            "keywords": f"{name} {ddl}".lower() # Index keywords
-                        })
+""")
                     
-                    # --- XỬ LÝ ROUTINE (HÀM) ---
+                    # --- XỬ LÝ ROUTINE (HÀM - QUAN TRỌNG NHẤT) ---
+                    # Chỉ lấy routine_name, routine_definition, ddl và arguments
                     elif 'routine_name' in item:
                         name = item.get('routine_name', 'Unknown')
+                        routine_def = item.get('routine_definition', '')
                         ddl = item.get('ddl', '')
-                        definition = item.get('routine_definition', '')
                         arguments = item.get('arguments', [])
                         
-                        # Format arguments
-                        if isinstance(arguments, (list, dict)):
-                            args_str = json.dumps(arguments, ensure_ascii=False)
-                        else:
-                            args_str = str(arguments)
+                        # Chuyển arguments thành string để hiển thị
+                        args_str = json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, (list, dict)) else str(arguments)
                         
-                        code_content = ddl if ddl else definition
-                        
-                        doc_content = f"""
+                        schema_parts.append(f"""
 [ROUTINE / FUNCTION]
 Name: `{name}`
 Arguments: {args_str}
-DEFINITION (SOURCE SQL CODE):
+Routine Definition:
 ```sql
-{code_content}
+{routine_def}
+```
+DDL:
+```sql
+{ddl}
 ```
 (AI NOTE: Hãy đọc kỹ code SQL trên. Nếu có CASE WHEN, hãy dùng nó để map giá trị ID tương ứng)
-"""
-                        GLOBAL_SCHEMA_DOCS.append({
-                            "name": name,
-                            "type": "ROUTINE",
-                            "content": doc_content,
-                            "keywords": f"{name} {code_content}".lower()
-                        })
+""")
 
         except Exception as e:
             print(f"❌ Lỗi đọc file {file_path}: {e}")
 
-    print(f"✅ Đã nạp {len(GLOBAL_SCHEMA_DOCS)} documents vào bộ nhớ RAG.")
-
-def search_relevant_schemas(query, top_k=10):
-    """
-    Hàm RAG Retrieval: Tìm kiếm schema liên quan dựa trên từ khóa.
-    """
-    if not GLOBAL_SCHEMA_DOCS:
-        return []
-    
-    query_lower = query.lower()
-    query_tokens = set(query_lower.split())
-    
-    scored_docs = []
-    
-    for doc in GLOBAL_SCHEMA_DOCS:
-        score = 0
-        doc_keywords = doc['keywords']
-        
-        # 1. Ưu tiên khớp tên bảng/hàm (Trọng số cao)
-        if doc['name'].lower() in query_lower:
-            score += 20
-            
-        # 2. Khớp từng từ khóa
-        for token in query_tokens:
-            if len(token) > 2 and token in doc_keywords:
-                score += 1
-        
-        if score > 0:
-            scored_docs.append((score, doc['content']))
-    
-    # Sắp xếp theo điểm giảm dần
-    scored_docs.sort(key=lambda x: x[0], reverse=True)
-    
-    # Lấy top K kết quả
-    relevant_chunks = [item[1] for item in scored_docs[:top_k]]
-    
-    # Fallback: Trả về một ít nếu không tìm thấy gì để AI không bị mù
-    if not relevant_chunks and GLOBAL_SCHEMA_DOCS:
-        return [doc['content'] for doc in GLOBAL_SCHEMA_DOCS[:3]]
-        
-    return relevant_chunks
+    # Gộp tất cả lại thành 1 chuỗi văn bản lớn
+    GLOBAL_FULL_SCHEMA = "\n----------------------------------------\n".join(schema_parts)
+    print(f"✅ Đã nạp xong! Tổng dung lượng Context: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
 
 # --- KHỞI CHẠY LẦN ĐẦU ---
 # Đảm bảo chạy khi file được import hoặc thực thi
@@ -257,18 +163,12 @@ def index():
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
     """API lấy danh sách các phiên chat"""
-    conn = get_db_connection()
-    if not conn: return jsonify([])
-    
-    try:
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT * FROM sessions ORDER BY created_at DESC")
-        rows = cur.fetchall()
-        conn.close()
-        return jsonify([dict(r) for r in rows])
-    except Exception as e:
-        print(f"Lỗi lấy danh sách session: {e}")
-        return jsonify([])
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    rows = c.execute("SELECT * FROM sessions ORDER BY created_at DESC").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
 
 @app.route('/api/history/<session_id>', methods=['GET'])
 def get_history(session_id): 
@@ -277,7 +177,9 @@ def get_history(session_id):
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    # Sử dụng logic RAG thay vì Global Full Schema
+    # Sử dụng biến toàn cục chứa toàn bộ schema
+    global GLOBAL_FULL_SCHEMA
+    
     data = request.json
     api_key = data.get('api_key') or DEFAULT_API_KEY
     user_msg = data.get('message')
@@ -291,22 +193,15 @@ def chat():
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
 
-        # 2. RAG RETRIEVAL: Tìm các Schema liên quan
-        print(f"🔍 Đang tìm schema liên quan cho câu hỏi: {user_msg}")
-        relevant_schemas = search_relevant_schemas(user_msg, top_k=8)
-        
-        rag_context = "\n----------------------------------------\n".join(relevant_schemas)
-        if not rag_context:
-            rag_context = "(Không tìm thấy bảng nào khớp rõ rệt. Hãy dùng kiến thức SQL chung.)"
-
-        # 3. XÂY DỰNG PROMPT (Với context đã được lọc gọn)
+        # 2. XÂY DỰNG PROMPT CAO CẤP (Đưa toàn bộ Schema vào)
+        # Đây là kỹ thuật "In-Context Learning": Dạy AI bằng chính dữ liệu của bạn ngay trong prompt.
         system_prompt = f"""Bạn là một chuyên gia BigQuery SQL cao cấp.
 
-[RAG CONTEXT - DỮ LIỆU LIÊN QUAN NHẤT]:
-Hệ thống đã tự động lọc ra các Bảng và Hàm có khả năng liên quan đến câu hỏi của user.
-Chỉ sử dụng thông tin này để viết query:
+[DỮ LIỆU CỦA HỆ THỐNG]:
+Dưới đây là toàn bộ Bảng và Hàm (Routine) bạn có quyền truy cập. 
+HÃY ĐỌC KỸ TOÀN BỘ ĐỂ HIỂU LOGIC DỮ LIỆU:
 
-{rag_context}
+{GLOBAL_FULL_SCHEMA}
 
 [YÊU CẦU]:
 Viết câu lệnh SQL Standard trả lời câu hỏi của user.
@@ -330,8 +225,8 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 
         messages_payload = [{"role": "system", "content": system_prompt}]
         
-        # Thêm lịch sử chat gần nhất
-        history = get_chat_history_formatted(session_id, limit=5)
+        # Thêm lịch sử chat gần nhất để AI nhớ ngữ cảnh
+        history = get_chat_history_formatted(session_id, limit=10)
         for msg in history:
             if msg['content'] != user_msg: 
                 messages_payload.append(msg)
@@ -339,40 +234,20 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
         # Thêm câu hỏi hiện tại
         messages_payload.append({"role": "user", "content": user_msg})
 
-        # 4. Gọi AI
+        # 3. Gọi AI
         client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
         
-        try:
-            response = client.chat(
-                model=MODEL_NAME, 
-                messages=messages_payload, 
-                stream=False, 
-                options={"temperature": 0.1}
-            )
-            ai_reply = response['message']['content']
-        except Exception as ollama_error:
-            # Xử lý lỗi token limit nếu vẫn bị
-            err_msg = str(ollama_error)
-            print(f"⚠️ Lỗi gọi AI: {err_msg}")
-            
-            if "too long" in err_msg or "400" in err_msg:
-                print("⚠️ Context vẫn dài, thử lại với ít schema hơn...")
-                less_relevant = search_relevant_schemas(user_msg, top_k=3)
-                less_context = "\n".join(less_relevant)
-                
-                messages_payload[0]['content'] = system_prompt.replace(rag_context, less_context)
-                
-                response = client.chat(
-                    model=MODEL_NAME, 
-                    messages=messages_payload, 
-                    stream=False, 
-                    options={"temperature": 0.1}
-                )
-                ai_reply = response['message']['content']
-            else:
-                return jsonify({"error": f"Lỗi AI: {err_msg}"}), 500
-
-        # 5. Lưu câu trả lời của AI
+        # Temperature = 0.1: Giữ cho AI đủ sáng tạo để viết SQL nhưng vẫn tuân thủ dữ liệu
+        response = client.chat(
+            model=MODEL_NAME, 
+            messages=messages_payload, 
+            stream=False, 
+            options={"temperature": 0.1}
+        )
+        
+        ai_reply = response['message']['content']
+        
+        # 4. Lưu câu trả lời của AI
         save_message(session_id, "assistant", ai_reply)
 
         return jsonify({"response": ai_reply})
@@ -385,7 +260,7 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 def reload_schema():
     """API để nạp lại dữ liệu khi bạn sửa file JSON"""
     load_all_schemas()
-    return jsonify({"status": "success", "message": "Đã nạp lại và re-index dữ liệu cho RAG!"})
+    return jsonify({"status": "success", "message": "Đã nạp lại toàn bộ dữ liệu Schema!"})
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
