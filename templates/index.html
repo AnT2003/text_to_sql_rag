@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -153,11 +152,32 @@
             }
 
             sessions.forEach(s => {
-                const div = document.createElement('div');
-                div.className = `session-item p-3 rounded cursor-pointer hover:bg-gray-700 transition text-sm truncate ${s.id === currentSessionId ? 'bg-gray-700' : ''}`;
-                div.innerText = s.title || "Không có tiêu đề";
-                div.onclick = () => isOfflineMode ? alert("Chế độ Demo: Không thể tải chi tiết chat thực.") : loadChatHistory(s.id, s.title);
-                container.appendChild(div);
+                const row = document.createElement('div');
+                row.className = `session-item flex items-center justify-between gap-2 p-2 rounded cursor-pointer hover:bg-gray-700 transition text-sm ${
+                    s.id === currentSessionId ? 'bg-gray-700' : ''
+                }`;
+
+                // Click load history
+                const title = document.createElement('div');
+                title.className = 'flex-1 truncate';
+                title.innerText = s.title || "Không có tiêu đề";
+                title.onclick = () => isOfflineMode
+                    ? alert("Chế độ Demo: Không thể tải chi tiết chat.")
+                    : loadChatHistory(s.id, s.title);
+
+                // Delete button
+                const delBtn = document.createElement('button');
+                delBtn.className = 'text-red-400 hover:text-red-300 px-1';
+                delBtn.innerHTML = '<i class="fas fa-trash"></i>';
+                delBtn.title = 'Xóa chat';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    deleteSession(s.id);
+                };
+
+                row.appendChild(title);
+                row.appendChild(delBtn);
+                container.appendChild(row);
             });
         }
 
@@ -264,6 +284,41 @@
             chatBox.appendChild(div);
             chatBox.scrollTop = chatBox.scrollHeight;
             return div.id;
+        }
+
+        async function deleteSession(sessionId) {
+            if (isOfflineMode) {
+                alert("Chế độ Demo: Không thể xóa chat.");
+                return;
+            }
+
+            const ok = confirm("Bạn có chắc muốn xóa toàn bộ chat này?");
+            if (!ok) return;
+
+            try {
+                const res = await fetch(`${API_BASE}/api/session/${sessionId}`, {
+                    method: 'DELETE'
+                });
+
+                if (!res.ok) throw new Error("Delete failed");
+
+                // Nếu đang mở đúng session bị xóa → reset UI
+                if (currentSessionId === sessionId) {
+                    currentSessionId = null;
+                    document.getElementById('chatBox').innerHTML = `
+                        <div class="text-center text-gray-400 mt-10">
+                            <i class="fas fa-robot text-4xl mb-2"></i><br>
+                            Chat đã bị xóa.
+                        </div>`;
+                    document.getElementById('chatTitle').innerText = "💬 New Chat";
+                }
+
+                loadSessions();
+
+            } catch (e) {
+                console.error("Lỗi xóa session:", e);
+                alert("❌ Không thể xóa chat. Kiểm tra backend.");
+            }
         }
 
         document.getElementById('userInput').addEventListener('keypress', (e) => {
