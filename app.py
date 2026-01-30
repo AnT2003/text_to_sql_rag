@@ -300,7 +300,7 @@ Viết câu lệnh SQL Standard trả lời câu hỏi của user.
 
 3. Luôn phải tham khảo kỹ phần `[ROUTINE / FUNCTION]` để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn.
 
-4. Luôn phải lấy đúng các bảng, trường dữ liệu đã được cung cấp trong ngữ cảnh ở các file schemas, không được tự bịa.
+4. Luôn phải đọc dữ liệu của toàn bộ schema_table và lấy đúng các bảng, trường dữ liệu đã được cung cấp trong ngữ cảnh ở các file schemas, không được tự bịa, không được giả định hay tạo bảng mẫu.
 
 [ĐỊNH DẠNG TRẢ VỀ]:
 
@@ -348,4 +348,5 @@ load_all_schemas()
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
 
