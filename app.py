@@ -34,7 +34,7 @@ db = SQLAlchemy(app)
 
 # Cấu hình AI Ollama
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-flash-preview:latest"  # Thay đổi model tùy vào setup thực tế
+MODEL_NAME = "gpt-oss:20b"  # Thay đổi model tùy vào setup thực tế
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -343,4 +343,5 @@ def reload_schema():
 # =========================================================
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
 
