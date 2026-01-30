@@ -13,15 +13,18 @@ from sqlalchemy import desc
 #  PHẦN 1: SETUP MÔI TRƯỜNG & CẤU HÌNH
 # =========================================================
 
+# Tắt cảnh báo token huggingface không cần thiết
+os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+
 load_dotenv()
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Bật CORS cho Frontend
 
 # Cấu hình Database (Tự động thích ứng SQLite/Postgres cho Render/Local)
 db_url = os.getenv("DATABASE_URL")
 if not db_url:
     raise RuntimeError("DATABASE_URL is required (PostgreSQL on Render)")
-if db_url.startswith("postgres://"):
+if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url  
@@ -31,13 +34,12 @@ db = SQLAlchemy(app)
 
 # Cấu hình AI Ollama
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-flash-preview:latest"  # Thay đổi model tùy vào setup thực tế
+MODEL_NAME = "gpt-oss:120b-cloud"  # Thay đổi model tùy vào setup thực tế
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
 # BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
 GLOBAL_FULL_SCHEMA = ""
-SCHEMA_DOCS = []
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS (SQLAlchemy)
@@ -79,6 +81,7 @@ def create_session_if_not_exists(session_id, first_msg):
     try:
         session = Session.query.get(session_id)
         if not session:
+            # Tạo title ngắn gọn từ tin nhắn đầu tiên
             title = (first_msg[:50] + '...') if len(first_msg) > 50 else first_msg
             db.session.add(Session(id=session_id, title=title))
             db.session.commit()
@@ -90,6 +93,7 @@ def get_chat_history_formatted(session_id, limit=10):
     try:
         msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
         history = []
+        # Đảo ngược lại để đúng thứ tự thời gian khi đưa vào Prompt
         for m in msgs[::-1]:
             history.append({"role": m.role, "content": m.content})
         return history
@@ -103,9 +107,9 @@ def get_chat_history_formatted(session_id, limit=10):
 def load_all_schemas():
     """
     Hàm này đọc file JSON schema và tạo ra Context cực kỳ chi tiết.
-    Không dùng FAISS/embedding để tránh OOM trên Render Free.
+    Nó lấy cả Dataset ID để đảm bảo query đúng bảng BigQuery.
     """
-    global GLOBAL_FULL_SCHEMA, SCHEMA_DOCS
+    global GLOBAL_FULL_SCHEMA
     print("🚀 Đang nạp TOÀN BỘ Schemas vào bộ nhớ (Strict Context Mode)...")
 
     if not os.path.exists(SCHEMA_FOLDER):
@@ -122,28 +126,43 @@ def load_all_schemas():
                 items = data if isinstance(data, list) else [data]
 
                 for item in items:
+                    # --- 1. Xác định Dataset ID & Project ID ---
                     table_ref = item.get('tableReference', {})
                     dataset_id = table_ref.get('datasetId') or item.get('dataset_id', 'UnknownDataset')
                     project_id = table_ref.get('projectId') or item.get('project_id', '')
 
+                    # Prefix đầy đủ: `project.dataset` hoặc `dataset`
                     full_prefix = f"{project_id}.{dataset_id}" if project_id else dataset_id
 
+                    # --- 2. XỬ LÝ TABLE (BẢNG DỮ LIỆU) ---
                     if 'table_name' in item and 'ddl' in item:
+
                         table_name = item['table_name']
                         full_table_name = f"`{full_prefix}.{table_name}`"
                         ddl = item['ddl']
                         table_type = item['table_type']
+                        # ----------------------------
+                        # Parse columns (list of names)
+                        # ----------------------------
                         cols = []
                         raw_columns = item.get('columns')
+
                         if raw_columns:
                             try:
                                 parsed_columns = json.loads(raw_columns)
+
                                 if isinstance(parsed_columns, list):
                                     for col_name in parsed_columns:
                                         cols.append(f"- `{col_name}`")
+
                             except json.JSONDecodeError:
-                                pass
+                                pass  # giữ rỗng nếu columns lỗi format
+
                         columns_block = "\n".join(cols)
+
+                        # ----------------------------
+                        # Append schema context
+                        # ----------------------------
                         schema_parts.append(f"""
                         [TABLE ENTITY]
                         Table Name: `{full_table_name}`
@@ -156,12 +175,24 @@ def load_all_schemas():
                         {columns_block}
                         """)
 
+                    # --- 3. XỬ LÝ ROUTINE / FUNCTION (LOGIC NGHIỆP VỤ) ---
                     elif 'routine_name' in item:
+
+                        # ================================
+                        # ROUTINE / FUNCTION ENTITY
+                        # Schema:
+                        # - routine_name
+                        # - routine_definition
+                        # - ddl
+                        # - arguments (optional)
+                        # ================================
+
                         routine_name = item.get('routine_name')
                         full_routine_name = f"`{full_prefix}.{routine_name}`"
                         ddl = item.get('ddl', 'No ddl.')
                         definition = item.get('routine_definition', '')
                         arguments = item.get('arguments', '')
+
                         schema_parts.append(f"""
                     [LOGIC ROUTINE / FUNCTION]
                     Routine / Function Name: {full_routine_name}
@@ -178,23 +209,13 @@ def load_all_schemas():
         except Exception as e:
             print(f"❌ Lỗi đọc file {file_path}: {e}")
 
+    # Gộp tất cả thành 1 biến String khổng lồ
     GLOBAL_FULL_SCHEMA = "\n----------------------------------------\n".join(schema_parts)
-
-    SCHEMA_DOCS = [{"text": block} for block in schema_parts]
-
     print(f"✅ Đã nạp xong! Tổng dung lượng Context: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
 
 # --- Gọi hàm khởi tạo ---
 init_db()
 load_all_schemas()
-
-def retrieve_schema_by_question(question, top_k=6):
-    """
-    Light-weight retrieval: chỉ lấy top_k block theo thứ tự (không embedding).
-    """
-    if not SCHEMA_DOCS:
-        return ""
-    return "\n".join([d["text"] for d in SCHEMA_DOCS[:top_k]])
 
 # =========================================================
 #  PHẦN 5: API ROUTES
@@ -240,6 +261,7 @@ def clear_history():
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
+    # Sử dụng biến Global chứa Schema đã load
     global GLOBAL_FULL_SCHEMA
 
     data = request.json
@@ -249,23 +271,23 @@ def chat():
 
     if not api_key or not session_id:
         return jsonify({"error": "Thiếu thông tin API Key hoặc Session ID"}), 400
-    retrieved_schema = retrieve_schema_by_question(user_msg)
 
     try:
+        # 1. Lưu tin nhắn User
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
-    
+
+        # 2. XÂY DỰNG PROMPT (ANTI-HALLUCINATION)
         system_prompt = f"""Bạn là chuyên gia SQL BigQuery.
 Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard.
-[DATABASE SCHEMA - CHỈ NHỮNG PHẦN LIÊN QUAN]:
-{retrieved_schema}
+
 [NGUYÊN TẮC BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM]:
-1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [DATABASE SCHEMA] phía trên. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT nếu schema không có.
+1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [DATABASE SCHEMA] {GLOBAL_FULL_SCHEMA}. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
 2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
 3. **Mapping Logic:**
    - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [LOGIC ROUTINE] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
    - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
-   - Ví dụ: Thấy `WHEN status=4 THEN 'Approved'` thì phải query `WHERE status = 4`.
+   - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
    - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
 4. **Kỹ thuật BigQuery:**
    - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
@@ -276,25 +298,35 @@ Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard
 
 1. Chỉ trả về code SQL trong ```sql ... ```.
 
-2. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
+2. Có thể giải thích ngắn gọn về query sau phần code.
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
+
+        # Thêm context hội thoại gần nhất
         history = get_chat_history_formatted(session_id, limit=8)
         for msg in history:
             if msg['content'] != user_msg:
                 messages_payload.append(msg)
+
         messages_payload.append({"role": "user", "content": user_msg})
 
+        # 3. GỌI OLLAMA API
         client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
+
         response = client.chat(
             model=MODEL_NAME,
             messages=messages_payload,
             stream=False,
+            # QUAN TRỌNG: temperature=0.0 để loại bỏ tính ngẫu nhiên, ép AI chỉ dựa vào dữ liệu có thật
             options={"temperature": 0.0, "top_p": 0.1}
         )
+
         reply = response['message']['content']
+
+        # 4. Lưu câu trả lời Assistant
         save_message(session_id, "assistant", reply)
+
         return jsonify({"response": reply})
 
     except Exception as e:
@@ -311,3 +343,7 @@ def reload_schema():
 # =========================================================
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
+
+
+
