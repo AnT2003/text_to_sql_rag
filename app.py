@@ -8,26 +8,20 @@ from ollama import Client
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
-import faiss
-from sentence_transformers import SentenceTransformer
-
 
 # =========================================================
 #  PHẦN 1: SETUP MÔI TRƯỜNG & CẤU HÌNH
 # =========================================================
 
-# Tắt cảnh báo token huggingface không cần thiết
-os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
-
 load_dotenv()
 app = Flask(__name__)
-CORS(app)  # Bật CORS cho Frontend
+CORS(app)
 
 # Cấu hình Database (Tự động thích ứng SQLite/Postgres cho Render/Local)
 db_url = os.getenv("DATABASE_URL")
 if not db_url:
     raise RuntimeError("DATABASE_URL is required (PostgreSQL on Render)")
-if db_url and db_url.startswith("postgres://"):
+if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url  
@@ -43,18 +37,7 @@ SCHEMA_FOLDER = "./schemas"
 
 # BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
 GLOBAL_FULL_SCHEMA = ""
-FAISS_INDEX = None
 SCHEMA_DOCS = []
-EMBED_MODEL = None
-
-def get_embed_model():
-    global EMBED_MODEL
-    if EMBED_MODEL is None:
-        EMBED_MODEL = SentenceTransformer(
-            "all-MiniLM-L6-v2",
-            device="cpu"
-        )
-    return EMBED_MODEL
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS (SQLAlchemy)
@@ -96,7 +79,6 @@ def create_session_if_not_exists(session_id, first_msg):
     try:
         session = Session.query.get(session_id)
         if not session:
-            # Tạo title ngắn gọn từ tin nhắn đầu tiên
             title = (first_msg[:50] + '...') if len(first_msg) > 50 else first_msg
             db.session.add(Session(id=session_id, title=title))
             db.session.commit()
@@ -108,7 +90,6 @@ def get_chat_history_formatted(session_id, limit=10):
     try:
         msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
         history = []
-        # Đảo ngược lại để đúng thứ tự thời gian khi đưa vào Prompt
         for m in msgs[::-1]:
             history.append({"role": m.role, "content": m.content})
         return history
@@ -122,9 +103,9 @@ def get_chat_history_formatted(session_id, limit=10):
 def load_all_schemas():
     """
     Hàm này đọc file JSON schema và tạo ra Context cực kỳ chi tiết.
-    Nó lấy cả Dataset ID để đảm bảo query đúng bảng BigQuery.
+    Không dùng FAISS/embedding để tránh OOM trên Render Free.
     """
-    global GLOBAL_FULL_SCHEMA
+    global GLOBAL_FULL_SCHEMA, SCHEMA_DOCS
     print("🚀 Đang nạp TOÀN BỘ Schemas vào bộ nhớ (Strict Context Mode)...")
 
     if not os.path.exists(SCHEMA_FOLDER):
@@ -141,43 +122,28 @@ def load_all_schemas():
                 items = data if isinstance(data, list) else [data]
 
                 for item in items:
-                    # --- 1. Xác định Dataset ID & Project ID ---
                     table_ref = item.get('tableReference', {})
                     dataset_id = table_ref.get('datasetId') or item.get('dataset_id', 'UnknownDataset')
                     project_id = table_ref.get('projectId') or item.get('project_id', '')
 
-                    # Prefix đầy đủ: `project.dataset` hoặc `dataset`
                     full_prefix = f"{project_id}.{dataset_id}" if project_id else dataset_id
 
-                    # --- 2. XỬ LÝ TABLE (BẢNG DỮ LIỆU) ---
                     if 'table_name' in item and 'ddl' in item:
-
                         table_name = item['table_name']
                         full_table_name = f"`{full_prefix}.{table_name}`"
                         ddl = item['ddl']
                         table_type = item['table_type']
-                        # ----------------------------
-                        # Parse columns (list of names)
-                        # ----------------------------
                         cols = []
                         raw_columns = item.get('columns')
-
                         if raw_columns:
                             try:
                                 parsed_columns = json.loads(raw_columns)
-
                                 if isinstance(parsed_columns, list):
                                     for col_name in parsed_columns:
                                         cols.append(f"- `{col_name}`")
-
                             except json.JSONDecodeError:
-                                pass  # giữ rỗng nếu columns lỗi format
-
+                                pass
                         columns_block = "\n".join(cols)
-
-                        # ----------------------------
-                        # Append schema context
-                        # ----------------------------
                         schema_parts.append(f"""
                         [TABLE ENTITY]
                         Table Name: `{full_table_name}`
@@ -190,24 +156,12 @@ def load_all_schemas():
                         {columns_block}
                         """)
 
-                    # --- 3. XỬ LÝ ROUTINE / FUNCTION (LOGIC NGHIỆP VỤ) ---
                     elif 'routine_name' in item:
-
-                        # ================================
-                        # ROUTINE / FUNCTION ENTITY
-                        # Schema:
-                        # - routine_name
-                        # - routine_definition
-                        # - ddl
-                        # - arguments (optional)
-                        # ================================
-
                         routine_name = item.get('routine_name')
                         full_routine_name = f"`{full_prefix}.{routine_name}`"
                         ddl = item.get('ddl', 'No ddl.')
                         definition = item.get('routine_definition', '')
                         arguments = item.get('arguments', '')
-
                         schema_parts.append(f"""
                     [LOGIC ROUTINE / FUNCTION]
                     Routine / Function Name: {full_routine_name}
@@ -224,29 +178,9 @@ def load_all_schemas():
         except Exception as e:
             print(f"❌ Lỗi đọc file {file_path}: {e}")
 
-    # Gộp tất cả thành 1 biến String khổng lồ
     GLOBAL_FULL_SCHEMA = "\n----------------------------------------\n".join(schema_parts)
-    # ==== RAG: build vector index ====
-    global FAISS_INDEX, SCHEMA_DOCS
-    SCHEMA_DOCS = []
 
-    for block in schema_parts:
-        SCHEMA_DOCS.append({
-            "text": block
-        })
-
-    model = get_embed_model()
-    embeddings = model.encode(
-        [d["text"] for d in SCHEMA_DOCS],
-        convert_to_numpy=True,
-        batch_size=8
-    )
-
-
-    FAISS_INDEX = faiss.IndexFlatL2(embeddings.shape[1])
-    FAISS_INDEX.add(embeddings)
-
-    print(f"🧠 FAISS index built with {len(SCHEMA_DOCS)} schema chunks")
+    SCHEMA_DOCS = [{"text": block} for block in schema_parts]
 
     print(f"✅ Đã nạp xong! Tổng dung lượng Context: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
 
@@ -255,20 +189,12 @@ init_db()
 load_all_schemas()
 
 def retrieve_schema_by_question(question, top_k=6):
-    if not FAISS_INDEX or not SCHEMA_DOCS:
+    """
+    Light-weight retrieval: chỉ lấy top_k block theo thứ tự (không embedding).
+    """
+    if not SCHEMA_DOCS:
         return ""
-
-    model = get_embed_model()
-    q_emb = model.encode([question], convert_to_numpy=True)
-
-    _, idxs = FAISS_INDEX.search(q_emb, top_k)
-
-    results = []
-    for i in idxs[0]:
-        if i < len(SCHEMA_DOCS):
-            results.append(SCHEMA_DOCS[i]["text"])
-
-    return "\n".join(results)
+    return "\n".join([d["text"] for d in SCHEMA_DOCS[:top_k]])
 
 # =========================================================
 #  PHẦN 5: API ROUTES
@@ -314,7 +240,6 @@ def clear_history():
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    # Sử dụng biến Global chứa Schema đã load
     global GLOBAL_FULL_SCHEMA
 
     data = request.json
@@ -327,11 +252,9 @@ def chat():
     retrieved_schema = retrieve_schema_by_question(user_msg)
 
     try:
-        # 1. Lưu tin nhắn User
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
     
-        # 2. XÂY DỰNG PROMPT (ANTI-HALLUCINATION)
         system_prompt = f"""Bạn là chuyên gia SQL BigQuery.
 Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard.
 [DATABASE SCHEMA - CHỈ NHỮNG PHẦN LIÊN QUAN]:
@@ -357,31 +280,21 @@ Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
-
-        # Thêm context hội thoại gần nhất
         history = get_chat_history_formatted(session_id, limit=8)
         for msg in history:
             if msg['content'] != user_msg:
                 messages_payload.append(msg)
-
         messages_payload.append({"role": "user", "content": user_msg})
 
-        # 3. GỌI OLLAMA API
         client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
-
         response = client.chat(
             model=MODEL_NAME,
             messages=messages_payload,
             stream=False,
-            # QUAN TRỌNG: temperature=0.0 để loại bỏ tính ngẫu nhiên, ép AI chỉ dựa vào dữ liệu có thật
             options={"temperature": 0.0, "top_p": 0.1}
         )
-
         reply = response['message']['content']
-
-        # 4. Lưu câu trả lời Assistant
         save_message(session_id, "assistant", reply)
-
         return jsonify({"response": reply})
 
     except Exception as e:
