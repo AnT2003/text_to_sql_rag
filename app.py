@@ -269,12 +269,13 @@ def chat():
 Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard.
 
 [NGUYÊN TẮC BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM]:
-1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [DATABASE SCHEMA] bên dưới. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
+1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [DATABASE SCHEMA] {GLOBAL_FULL_SCHEMA}. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
 2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
 3. **Mapping Logic:**
    - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [LOGIC ROUTINE] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
    - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
    - Ví dụ: Thấy `WHEN status=4 THEN 'Approved'` thì phải query `WHERE status = 4`.
+   - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
 4. **Kỹ thuật BigQuery:**
    - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
    - ✅ Dùng JOIN (LEFT JOIN) kết hợp GROUP BY nếu cần.
