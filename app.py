@@ -133,48 +133,76 @@ def load_all_schemas():
                     full_prefix = f"{project_id}.{dataset_id}" if project_id else dataset_id
 
                     # --- 2. XỬ LÝ TABLE (BẢNG DỮ LIỆU) ---
-                    if 'table_name' in item or 'tableId' in table_ref:
-                        table_name = item.get('table_name') or table_ref.get('tableId')
-                        description = item.get('description', 'No description.')
+                    if 'table_name' in item and 'ddl' in item:
 
-                        # Xử lý danh sách cột chi tiết
+                        table_name = item['table_name']
+                        full_table_name = f"`{full_prefix}.{table_name}`"
+                        ddl = item['ddl']
+                        table_type = item['table_type']
+                        # ----------------------------
+                        # Parse columns (list of names)
+                        # ----------------------------
                         cols = []
-                        for c in item.get('columns', []):
-                            c_name = c.get('name')
-                            c_type = c.get('type')
-                            c_desc = c.get('description', '')
-                            col_str = f"- `{c_name}` ({c_type})"
-                            if c_desc: col_str += f": {c_desc}"
-                            cols.append(col_str)
+                        raw_columns = item.get('columns')
+
+                        if raw_columns:
+                            try:
+                                parsed_columns = json.loads(raw_columns)
+
+                                if isinstance(parsed_columns, list):
+                                    for col_name in parsed_columns:
+                                        cols.append(f"- `{col_name}`")
+
+                            except json.JSONDecodeError:
+                                pass  # giữ rỗng nếu columns lỗi format
 
                         columns_block = "\n".join(cols)
 
+                        # ----------------------------
+                        # Append schema context
+                        # ----------------------------
                         schema_parts.append(f"""
-[TABLE ENTITY]
-Full Name: `{full_prefix}.{table_name}`
-Description: {description}
-COLUMNS DEFINITION (ONLY USE THESE COLUMNS):
-{columns_block}
-""")
+                        [TABLE ENTITY]
+                        Table Name: `{full_table_name}`
+                        Table Type: {table_type}
+                        Source DDL:
+                        ```sql
+                        {ddl}
+                        ```
+                        COLUMNS DEFINITION (ONLY USE THESE COLUMNS):
+                        {columns_block}
+                        """)
 
                     # --- 3. XỬ LÝ ROUTINE / FUNCTION (LOGIC NGHIỆP VỤ) ---
-                    elif 'routine_name' in item or 'routineId' in item.get('routineReference', {}):
-                        routine_ref = item.get('routineReference', {})
-                        routine_name = item.get('routine_name') or routine_ref.get('routineId')
+                    elif 'routine_name' in item:
 
-                        # Lấy code SQL gốc
-                        definition = item.get('routine_definition') or item.get('ddl') or ''
-                        description = item.get('description', '')
+                        # ================================
+                        # ROUTINE / FUNCTION ENTITY
+                        # Schema:
+                        # - routine_name
+                        # - routine_definition
+                        # - ddl
+                        # - arguments (optional)
+                        # ================================
+
+                        routine_name = item.get('routine_name')
+                        full_routine_name = f"`{full_prefix}.{routine_name}`"
+                        ddl = item.get('ddl', 'No ddl.')
+                        definition = item.get('routine_definition', '')
+                        arguments = item.get('arguments', '')
 
                         schema_parts.append(f"""
-[LOGIC ROUTINE / FUNCTION]
-Full Name: `{full_prefix}.{routine_name}`
-Description: {description}
-SOURCE CODE (READ CAREFULLY TO MAP VALUES/STATUS):
-```sql
-{definition}
-```
-""")
+                    [LOGIC ROUTINE / FUNCTION]
+                    Routine / Function Name: {full_routine_name}
+
+                    Source DDL:
+                    ```sql
+                    {ddl}
+                    ARGUMENTS:
+                    {arguments}
+                    SOURCE CODE (READ CAREFULLY TO MAP VALUES / STATUS):
+                    {definition}
+                    """)
 
         except Exception as e:
             print(f"❌ Lỗi đọc file {file_path}: {e}")
