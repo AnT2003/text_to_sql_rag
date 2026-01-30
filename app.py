@@ -21,11 +21,13 @@ app = Flask(__name__)
 CORS(app)  # Bật CORS cho Frontend
 
 # Cấu hình Database (Tự động thích ứng SQLite/Postgres cho Render/Local)
-db_url = os.getenv("DATABASE_URL", "sqlite:///chat_history.db")
+db_url = os.getenv("DATABASE_URL")
+if not db_url:
+    raise RuntimeError("DATABASE_URL is required (PostgreSQL on Render)")
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url  
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -52,7 +54,7 @@ class Session(db.Model):
 class Message(db.Model):
     __tablename__ = 'messages'
     id = db.Column(db.Integer, primary_key=True)
-    session_id = db.Column(db.String(50), db.ForeignKey('sessions.id'), nullable=False)
+    session_id = db.Column(db.String(50), db.ForeignKey('sessions.id'),ondelete="CASCADE", nullable=False)
     role = db.Column(db.String(20), nullable=False)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
@@ -234,6 +236,17 @@ def get_sessions():
 @app.route('/api/history/<session_id>', methods=['GET'])
 def get_history(session_id):
     return jsonify(get_chat_history_formatted(session_id, limit=50))
+
+@app.route("/api/session/<session_id>", methods=["DELETE"])
+def delete_session(session_id):
+    try:
+        Message.query.filter_by(session_id=session_id).delete()
+        Session.query.filter_by(id=session_id).delete()
+        db.session.commit()
+        return jsonify({"status": "success", "message": "Chat history deleted"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/clear_history', methods=['POST'])
 def clear_history():
