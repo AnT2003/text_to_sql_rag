@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -15,10 +16,15 @@
         ::-webkit-scrollbar-track { background: #f1f1f1; }
         ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #555; }
+        
+        .status-badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; }
+        .status-online { background: #d1fae5; color: #065f46; border: 1px solid #34d399; }
+        .status-offline { background: #fee2e2; color: #991b1b; border: 1px solid #f87171; }
     </style>
 </head>
 <body class="bg-gray-100 h-screen flex">
 
+    <!-- Sidebar -->
     <div class="w-64 bg-gray-900 text-white flex flex-col h-full shadow-xl">
         <div class="p-4 border-b border-gray-700 flex justify-between items-center">
             <h1 class="font-bold text-lg">🗄️ History</h1>
@@ -28,18 +34,25 @@
         </div>
         
         <div id="sessionList" class="flex-1 overflow-y-auto p-2 space-y-1">
-            </div>
+            <div class="p-3 text-gray-500 text-xs text-center">Đang tải...</div>
+        </div>
 
         <div class="p-4 border-t border-gray-700 text-xs text-gray-400 text-center">
-            Powered by Ollama & Flask
+            <div id="connectionStatus" class="mb-2 status-badge status-offline inline-block">
+                <i class="fas fa-circle text-[8px] mr-1"></i> Disconnected
+            </div>
+            <div>Powered by Ollama & Flask</div>
         </div>
     </div>
 
+    <!-- Main Chat Area -->
     <div class="flex-1 flex flex-col h-full bg-white relative">
         
         <div class="bg-white shadow-sm p-4 border-b flex justify-between items-center z-10">
             <h2 class="font-semibold text-gray-700" id="chatTitle">💬 New Chat</h2>
-            <div class="text-xs text-gray-500">Model: GPT-OSS 120B</div>
+            <div class="text-xs text-gray-500 flex items-center gap-2">
+                <span>Model: GPT-OSS 120B</span>
+            </div>
         </div>
 
         <div id="chatBox" class="flex-1 p-4 overflow-y-auto space-y-4 pb-24">
@@ -64,14 +77,31 @@
 
     <script>
         let currentSessionId = null;
+        let isOfflineMode = false;
 
-        // 1. Khởi tạo: Load danh sách session
+        // CẤU HÌNH API BASE URL
+        const API_BASE = (window.location.protocol === 'file:' || window.location.origin === 'null' || window.location.href.startsWith('blob:'))
+            ? 'http://127.0.0.1:5000'
+            : '';
+
         document.addEventListener("DOMContentLoaded", () => {
             loadSessions();
-            createNewSession(); // Mặc định vào là tạo chat mới luôn
+            createNewSession();
         });
 
-        // Tạo UUID đơn giản cho Session ID
+        function updateConnectionStatus(isOnline) {
+            const el = document.getElementById('connectionStatus');
+            if (isOnline) {
+                el.className = 'mb-2 status-badge status-online inline-block';
+                el.innerHTML = '<i class="fas fa-circle text-[8px] mr-1"></i> Connected';
+                isOfflineMode = false;
+            } else {
+                el.className = 'mb-2 status-badge status-offline inline-block';
+                el.innerHTML = '<i class="fas fa-exclamation-triangle text-[8px] mr-1"></i> No Backend';
+                isOfflineMode = true;
+            }
+        }
+
         function generateUUID() {
             return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
                 var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -85,42 +115,65 @@
                 <div class="text-center text-gray-400 mt-10">
                     <i class="fas fa-robot text-4xl mb-2"></i><br>
                     Chat mới đã sẵn sàng. Hãy hỏi gì đó!
+                    ${isOfflineMode ? '<div class="text-xs text-red-400 mt-2">(Đang chạy chế độ Demo Offline)</div>' : ''}
                 </div>`;
             document.getElementById('chatTitle').innerText = "💬 New Chat";
-            
-            // Xóa active class ở sidebar
             document.querySelectorAll('.session-item').forEach(el => el.classList.remove('bg-gray-700'));
         }
 
         async function loadSessions() {
+            const container = document.getElementById('sessionList');
             try {
-                const res = await fetch('/api/sessions');
+                const res = await fetch(`${API_BASE}/api/sessions`);
+                if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+                
                 const sessions = await res.json();
-                const container = document.getElementById('sessionList');
-                container.innerHTML = '';
+                updateConnectionStatus(true); // Kết nối thành công
+                renderSessionList(sessions);
+            } catch (e) { 
+                console.warn("Server disconnected, switching to offline UI.");
+                updateConnectionStatus(false);
+                
+                // Hiển thị dữ liệu giả lập (Mock Data) để UI không bị trống
+                const mockSessions = [
+                    { id: 'mock-1', title: 'Phân tích doanh thu tháng 10 (Demo)' },
+                    { id: 'mock-2', title: 'Truy vấn khách hàng VIP (Demo)' }
+                ];
+                renderSessionList(mockSessions);
+            }
+        }
 
-                sessions.forEach(s => {
-                    const div = document.createElement('div');
-                    div.className = `session-item p-3 rounded cursor-pointer hover:bg-gray-700 transition text-sm truncate ${s.id === currentSessionId ? 'bg-gray-700' : ''}`;
-                    div.innerText = s.title || "Không có tiêu đề";
-                    div.onclick = () => loadChatHistory(s.id, s.title);
-                    container.appendChild(div);
-                });
-            } catch (e) { console.error(e); }
+        function renderSessionList(sessions) {
+            const container = document.getElementById('sessionList');
+            container.innerHTML = '';
+            
+            if (sessions.length === 0) {
+                container.innerHTML = '<div class="p-3 text-gray-500 text-xs text-center">Chưa có lịch sử.</div>';
+                return;
+            }
+
+            sessions.forEach(s => {
+                const div = document.createElement('div');
+                div.className = `session-item p-3 rounded cursor-pointer hover:bg-gray-700 transition text-sm truncate ${s.id === currentSessionId ? 'bg-gray-700' : ''}`;
+                div.innerText = s.title || "Không có tiêu đề";
+                div.onclick = () => isOfflineMode ? alert("Chế độ Demo: Không thể tải chi tiết chat thực.") : loadChatHistory(s.id, s.title);
+                container.appendChild(div);
+            });
         }
 
         async function loadChatHistory(sessionId, title) {
+            if (isOfflineMode) return;
+            
             currentSessionId = sessionId;
             document.getElementById('chatTitle').innerText = "💬 " + title;
-            document.getElementById('chatBox').innerHTML = '<div class="text-center">Đang tải lịch sử...</div>';
+            document.getElementById('chatBox').innerHTML = '<div class="text-center text-gray-500 mt-10">Đang tải lịch sử...</div>';
             
-            // Highlight active item
             document.querySelectorAll('.session-item').forEach(el => el.classList.remove('bg-gray-700'));
-            // Tìm và highlight item hiện tại (đơn giản hóa)
             loadSessions(); 
 
             try {
-                const res = await fetch(`/api/history/${sessionId}`);
+                const res = await fetch(`${API_BASE}/api/history/${sessionId}`);
+                if (!res.ok) throw new Error('Không thể tải lịch sử');
                 const messages = await res.json();
                 
                 const chatBox = document.getElementById('chatBox');
@@ -134,7 +187,10 @@
                     appendMessage(msg.role === 'user' ? 'user' : 'bot', msg.content);
                 });
 
-            } catch(e) { console.error(e); }
+            } catch(e) { 
+                console.error("Lỗi load history:", e);
+                document.getElementById('chatBox').innerHTML = '<div class="text-center text-red-500 mt-10">❌ Lỗi tải lịch sử chat.</div>';
+            }
         }
 
         async function sendMessage() {
@@ -142,13 +198,22 @@
             const text = input.value.trim();
             if (!text || !currentSessionId) return;
 
-            // UI Update
             appendMessage('user', text);
             input.value = '';
             const loadingId = appendMessage('bot', '...', true);
 
+            // Nếu đang offline (không chạy server python), trả lời giả lập
+            if (isOfflineMode) {
+                setTimeout(() => {
+                    document.getElementById(loadingId).remove();
+                    const mockReply = `⚠️ **Backend chưa chạy!**\n\nĐây là câu trả lời giả lập. Để AI hoạt động thực sự, hãy chạy lệnh:\n\`\`\`bash\npython app.py\n\`\`\`\n\nSQL giả lập cho câu hỏi "${text}":\n\`\`\`sql\nSELECT * FROM demo_table WHERE query = '${text}';\n\`\`\``;
+                    appendMessage('bot', mockReply);
+                }, 1000);
+                return;
+            }
+
             try {
-                const res = await fetch('/api/chat', {
+                const res = await fetch(`${API_BASE}/api/chat`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -157,24 +222,29 @@
                     })
                 });
                 
+                if (!res.ok) throw new Error('Network response was not ok');
+
                 const data = await res.json();
                 document.getElementById(loadingId).remove();
 
                 if (data.error) appendMessage('bot', '❌ Lỗi: ' + data.error);
                 else {
                     appendMessage('bot', data.response);
-                    loadSessions(); // Reload sidebar để cập nhật tiêu đề mới nếu cần
+                    loadSessions(); 
                 }
             } catch (e) {
                 document.getElementById(loadingId).remove();
-                appendMessage('bot', '❌ Lỗi kết nối server.');
+                // Tự động chuyển sang chế độ offline nếu gọi API thất bại
+                updateConnectionStatus(false);
+                appendMessage('bot', `❌ **Lỗi kết nối Server:**\nKhông thể gọi API. Vui lòng kiểm tra xem bạn đã chạy \`python app.py\` chưa.\n\n_Chuyển sang chế độ Demo..._`);
             }
         }
 
         function appendMessage(role, text, isLoading = false) {
             const chatBox = document.getElementById('chatBox');
-            // Xóa message chào mừng nếu có
-            if (chatBox.innerText.includes("Chọn một đoạn chat cũ")) chatBox.innerHTML = '';
+            if (chatBox.innerText.includes("Chọn một đoạn chat cũ") || chatBox.innerText.includes("Chat mới đã sẵn sàng")) {
+                chatBox.innerHTML = '';
+            }
 
             const div = document.createElement('div');
             div.id = isLoading ? 'loading-msg' : '';
