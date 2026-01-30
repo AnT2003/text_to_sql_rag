@@ -287,7 +287,7 @@ Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard
 3. **Mapping Logic:**
    - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [LOGIC ROUTINE] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
    - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
-   - Ví dụ: Thấy `WHEN status=4 THEN 'Approved'` thì phải query `WHERE status = 4`.
+   - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
    - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
 4. **Kỹ thuật BigQuery:**
    - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
@@ -343,3 +343,4 @@ def reload_schema():
 # =========================================================
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
