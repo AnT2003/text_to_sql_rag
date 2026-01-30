@@ -45,7 +45,16 @@ SCHEMA_FOLDER = "./schemas"
 GLOBAL_FULL_SCHEMA = ""
 FAISS_INDEX = None
 SCHEMA_DOCS = []
-EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+EMBED_MODEL = None
+
+def get_embed_model():
+    global EMBED_MODEL
+    if EMBED_MODEL is None:
+        EMBED_MODEL = SentenceTransformer(
+            "all-MiniLM-L6-v2",
+            device="cpu"
+        )
+    return EMBED_MODEL
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS (SQLAlchemy)
@@ -226,10 +235,13 @@ def load_all_schemas():
             "text": block
         })
 
-    embeddings = EMBED_MODEL.encode(
+    model = get_embed_model()
+    embeddings = model.encode(
         [d["text"] for d in SCHEMA_DOCS],
-        convert_to_numpy=True
+        convert_to_numpy=True,
+        batch_size=8
     )
+
 
     FAISS_INDEX = faiss.IndexFlatL2(embeddings.shape[1])
     FAISS_INDEX.add(embeddings)
@@ -246,7 +258,9 @@ def retrieve_schema_by_question(question, top_k=6):
     if not FAISS_INDEX or not SCHEMA_DOCS:
         return ""
 
-    q_emb = EMBED_MODEL.encode([question], convert_to_numpy=True)
+    model = get_embed_model()
+    q_emb = model.encode([question], convert_to_numpy=True)
+
     _, idxs = FAISS_INDEX.search(q_emb, top_k)
 
     results = []
