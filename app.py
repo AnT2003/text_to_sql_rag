@@ -8,6 +8,9 @@ from ollama import Client
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
+import faiss
+from sentence_transformers import SentenceTransformer
+
 
 # =========================================================
 #  PHẦN 1: SETUP MÔI TRƯỜNG & CẤU HÌNH
@@ -34,12 +37,15 @@ db = SQLAlchemy(app)
 
 # Cấu hình AI Ollama
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gpt-oss:120b-cloud"  # Thay đổi model tùy vào setup thực tế
+MODEL_NAME = "gemini-3-flash-preview:latest"  # Thay đổi model tùy vào setup thực tế
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
 # BIẾN TOÀN CỤC: Chứa toàn bộ kiến thức về Database
 GLOBAL_FULL_SCHEMA = ""
+FAISS_INDEX = None
+SCHEMA_DOCS = []
+EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS (SQLAlchemy)
@@ -211,11 +217,44 @@ def load_all_schemas():
 
     # Gộp tất cả thành 1 biến String khổng lồ
     GLOBAL_FULL_SCHEMA = "\n----------------------------------------\n".join(schema_parts)
+    # ==== RAG: build vector index ====
+    global FAISS_INDEX, SCHEMA_DOCS
+    SCHEMA_DOCS = []
+
+    for block in schema_parts:
+        SCHEMA_DOCS.append({
+            "text": block
+        })
+
+    embeddings = EMBED_MODEL.encode(
+        [d["text"] for d in SCHEMA_DOCS],
+        convert_to_numpy=True
+    )
+
+    FAISS_INDEX = faiss.IndexFlatL2(embeddings.shape[1])
+    FAISS_INDEX.add(embeddings)
+
+    print(f"🧠 FAISS index built with {len(SCHEMA_DOCS)} schema chunks")
+
     print(f"✅ Đã nạp xong! Tổng dung lượng Context: {len(GLOBAL_FULL_SCHEMA)} ký tự.")
 
 # --- Gọi hàm khởi tạo ---
 init_db()
 load_all_schemas()
+
+def retrieve_schema_by_question(question, top_k=6):
+    if not FAISS_INDEX or not SCHEMA_DOCS:
+        return ""
+
+    q_emb = EMBED_MODEL.encode([question], convert_to_numpy=True)
+    _, idxs = FAISS_INDEX.search(q_emb, top_k)
+
+    results = []
+    for i in idxs[0]:
+        if i < len(SCHEMA_DOCS):
+            results.append(SCHEMA_DOCS[i]["text"])
+
+    return "\n".join(results)
 
 # =========================================================
 #  PHẦN 5: API ROUTES
@@ -271,23 +310,25 @@ def chat():
 
     if not api_key or not session_id:
         return jsonify({"error": "Thiếu thông tin API Key hoặc Session ID"}), 400
+    retrieved_schema = retrieve_schema_by_question(user_msg)
 
     try:
         # 1. Lưu tin nhắn User
         create_session_if_not_exists(session_id, user_msg)
         save_message(session_id, "user", user_msg)
-
+    
         # 2. XÂY DỰNG PROMPT (ANTI-HALLUCINATION)
         system_prompt = f"""Bạn là chuyên gia SQL BigQuery.
 Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard.
-
+[DATABASE SCHEMA - CHỈ NHỮNG PHẦN LIÊN QUAN]:
+{retrieved_schema}
 [NGUYÊN TẮC BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM]:
-1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [DATABASE SCHEMA] {GLOBAL_FULL_SCHEMA}. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
+1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [DATABASE SCHEMA] phía trên. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT nếu schema không có.
 2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
 3. **Mapping Logic:**
    - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [LOGIC ROUTINE] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
    - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
-   - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
+   - Ví dụ: Thấy `WHEN status=4 THEN 'Approved'` thì phải query `WHERE status = 4`.
    - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
 4. **Kỹ thuật BigQuery:**
    - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
@@ -298,7 +339,7 @@ Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard
 
 1. Chỉ trả về code SQL trong ```sql ... ```.
 
-2. Có thể giải thích ngắn gọn về query sau phần code.
+2. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
@@ -343,8 +384,3 @@ def reload_schema():
 # =========================================================
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
-
-
-
-
-
