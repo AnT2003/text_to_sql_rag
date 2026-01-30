@@ -298,7 +298,7 @@ Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard
 
 1. Chỉ trả về code SQL trong ```sql ... ```.
 
-2. Có thể giải thích ngắn gọn sau phần code nếu cần thiết.
+2. Có thể giải thích ngắn gọn về query sau phần code.
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
@@ -343,6 +343,7 @@ def reload_schema():
 # =========================================================
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
 
 
 
