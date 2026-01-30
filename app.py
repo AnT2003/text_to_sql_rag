@@ -16,7 +16,7 @@ SCHEMA_FOLDER = "./schemas"
 DB_FILE = "chat_history.db"
 # Cấu hình Ollama
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gpt-oss:120b"
+MODEL_NAME = "gemini-3-flash-preview:latest"
 # API Key
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY") 
 
@@ -348,5 +348,6 @@ load_all_schemas()
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
 
 
