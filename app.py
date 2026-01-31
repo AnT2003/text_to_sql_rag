@@ -131,27 +131,30 @@ class RAGEngine:
                     items = data if isinstance(data, list) else [data]
 
                     for item in items:
-                        # Xây dựng Document Text
-                        doc_content = ""
-                        keywords_source = "" # Dùng chuỗi này để tokenize đánh index
-                        
+                        # --- SỬA ĐOẠN NÀY ĐỂ TRÁNH LỖI ".." ---
                         table_ref = item.get('tableReference', {})
                         dataset = table_ref.get('datasetId') or item.get('dataset_id', '')
                         project = table_ref.get('projectId') or item.get('project_id', '')
                         
+                        # Logic tạo prefix chuẩn: Nếu có project thì "project.dataset", ko thì chỉ "dataset"
+                        full_prefix = f"{project}.{dataset}" if project else dataset
+                        # ---------------------------------------
+
+                        doc_content = ""
+                        keywords_source = ""
+                        
                         if 'table_name' in item:
                             t_name = item['table_name']
-                            full_name = f"`{project}.{dataset}.{t_name}`"
+                            full_name = f"`{full_prefix}.{t_name}`" # <-- Sửa lại biến này
+                            
                             cols_desc = []
                             col_tokens = []
                             
-                            # Xử lý columns
                             raw_cols = item.get('columns', '[]')
                             try:
                                 parsed = json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols
                                 if isinstance(parsed, list):
                                     for col in parsed:
-                                        # Hỗ trợ cả format string đơn giản hoặc object có description
                                         c_name = col if isinstance(col, str) else col.get('name')
                                         c_desc = ""
                                         if isinstance(col, dict) and 'description' in col:
@@ -161,13 +164,13 @@ class RAGEngine:
                                         col_tokens.append(f"{c_name} {c_desc}")
                             except: pass
 
-                            doc_content = f"[TABLE] {full_name}\nColumns:\n" + "\n".join(cols_desc)
-                            # Nguồn index bao gồm: Tên bảng + Tên cột + Description cột
+                            # Bổ sung dòng nhắc nhở Dataset ID ngay trong content
+                            doc_content = f"[TABLE] {full_name}\n(Full ID: {full_name})\nColumns:\n" + "\n".join(cols_desc)
                             keywords_source = f"{dataset} {t_name} {' '.join(col_tokens)}"
 
                         elif 'routine_name' in item:
                             r_name = item['routine_name']
-                            full_name = f"`{project}.{dataset}.{r_name}`"
+                            full_name = f"`{full_prefix}.{r_name}`" # <-- Sửa lại biến này
                             definition = item.get('routine_definition', '')
                             doc_content = f"[FUNCTION] {full_name}\nLogic:\n{definition}"
                             keywords_source = f"{dataset} {r_name} {definition}"
@@ -179,7 +182,6 @@ class RAGEngine:
             except Exception as e:
                 print(f"Error loading {file_path}: {e}")
 
-        # KHỞI TẠO BM25 INDEX
         if tokenized_corpus:
             self.bm25 = BM25Okapi(tokenized_corpus)
             self.schema_docs = new_docs
@@ -312,7 +314,7 @@ Goal: Generate optimized Standard SQL queries based strictly on the provided sch
 {relevant_schemas}
 
 [GUIDELINES]:
-1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT]. Do not hallucinate columns.
+1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT] (e.g., `project-id.dataset.table`). Do not hallucinate columns. Copy the `[TABLE] name` exactly from the context block.
 2. **Expansion Context**: The user query might use business terms. Map them to the technical column names found in the schema.
 3. **Logic Handling**: If a [FUNCTION] or Routine is present in context, use its logic (CASE WHEN...) to filter data correctly (e.g., status codes).
 4. **Syntax**: Use Google Standard SQL (BigQuery) syntax. usage of backticks (`) for table names is mandatory (Project.Dataset.Table).
