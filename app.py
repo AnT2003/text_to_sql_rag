@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-flash-preview:cloud"
+MODEL_NAME = "gemini-3-flash-preview:latest"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -340,11 +340,12 @@ Goal: Generate optimized Standard SQL queries based strictly on the provided sch
 {relevant_schemas}
 
 [GUIDELINES]:
-1. **Source of Truth**: Use ONLY the tables, columns, and routines explicitly provided in [CONTEXT]. Any table, column, or function not present in [CONTEXT] MUST NOT be used or assumed.
-2. **Expansion Context**: Business terms in the user query may ONLY be mapped to technical column names that exist verbatim in the provided schema. If no valid mapping exists, do NOT generate SQL.
-3. **Logic Handling**: If a [FUNCTION] or Routine is present in [CONTEXT], you MUST reuse its logic exactly as defined. Do NOT re-implement, simplify, or invent CASE WHEN logic.
-4. **Syntax**: Use Google Standard SQL (BigQuery). Fully qualified table names with backticks (`Project.Dataset.Table`) are mandatory.
-5. **Output**: Return ONLY valid SQL wrapped inside ```sql ... ```. Brief explanation of the query is optional after the code block.
+1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT]. Do not hallucinate columns.
+2. **Expansion Context**: The user query might use business terms. Map them to the technical column names found in the schema.
+3. **Logic Handling**: If a [FUNCTION] or Routine is present in context, use its logic (CASE WHEN...) to filter data correctly (e.g., status codes). You MUST reuse its logic exactly as defined. Do NOT re-implement, simplify, or invent CASE WHEN logic.
+4. **Syntax**: Use Google Standard SQL (BigQuery) syntax. usage of backticks (`) for table names is mandatory (Project.Dataset.Table).
+5. **Output**: Return ONLY the SQL code inside ```sql ... ``` block. Brief explanation of the query is optional after the code block.
+
 User Question: {user_msg}
 """
 
