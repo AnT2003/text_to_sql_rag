@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-flash-preview:latest"
+MODEL_NAME = "gemini-3-flash-preview:cloud"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -344,7 +344,7 @@ Goal: Generate optimized Standard SQL queries based strictly on the provided sch
 2. **Expansion Context**: Business terms in the user query may ONLY be mapped to technical column names that exist verbatim in the provided schema. If no valid mapping exists, do NOT generate SQL.
 3. **Logic Handling**: If a [FUNCTION] or Routine is present in [CONTEXT], you MUST reuse its logic exactly as defined. Do NOT re-implement, simplify, or invent CASE WHEN logic.
 4. **Syntax**: Use Google Standard SQL (BigQuery). Fully qualified table names with backticks (`Project.Dataset.Table`) are mandatory.
-5. **Output**: Return ONLY valid SQL wrapped inside ```sql ... ```. Do NOT include explanations or any output outside the SQL block.
+5. **Output**: Return ONLY valid SQL wrapped inside ```sql ... ```. Brief explanation of the query is optional after the code block.
 User Question: {user_msg}
 """
 
