@@ -12,3 +12,5 @@ psycopg2-binary
 
 # ===== Ollama Client =====
 ollama
+# ===== RAG - Score ====== 
+rank-bm25
