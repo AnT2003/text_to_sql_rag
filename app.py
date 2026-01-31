@@ -314,7 +314,9 @@ Goal: Generate optimized Standard SQL queries based strictly on the provided sch
 {relevant_schemas}
 
 [GUIDELINES]:
-1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT] (e.g., `project-id.dataset.table`). Do not hallucinate columns. Copy the `[TABLE] name` exactly from the context block.
+1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT] (e.g., `project-id.dataset.table`). Do not hallucinate columns. 
+    - ❌ WRONG: `..table`, `dataset.table` (if project exists).
+    - ✅ RIGHT: Copy the `[TABLE] name` exactly from the context block.
 2. **Expansion Context**: The user query might use business terms. Map them to the technical column names found in the schema.
 3. **Logic Handling**: If a [FUNCTION] or Routine is present in context, use its logic (CASE WHEN...) to filter data correctly (e.g., status codes).
 4. **Syntax**: Use Google Standard SQL (BigQuery) syntax. usage of backticks (`) for table names is mandatory (Project.Dataset.Table).
