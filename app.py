@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "ggpt-oss:120b"
+MODEL_NAME = "gpt-oss:120b"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -379,4 +379,5 @@ if __name__ == '__main__':
     init_db()
     rag_engine.load_schemas()
     app.run(debug=True, port=5000)
+
 
