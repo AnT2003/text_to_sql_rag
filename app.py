@@ -2,14 +2,14 @@ import os
 import json
 import glob
 import datetime
-import re
+import re  # <--- Bắt buộc có để trích xuất tên từ DDL
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from ollama import Client
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
-from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
+from rank_bm25 import BM25Okapi  # Thư viện RAG tối ưu
 
 # =========================================================
 #  PHẦN 1: CONFIG & SETUP
@@ -34,6 +34,10 @@ OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gemini-3-flash-preview:latest"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
+
+# BIẾN TOÀN CỤC
+SCHEMA_DOCS = []        # List chứa các đoạn text schema
+BM25_MODEL = None       # Model tìm kiếm
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
@@ -82,168 +86,161 @@ def get_chat_history_formatted(session_id, limit=10):
         return []
 
 # =========================================================
-#  PHẦN 3: ADVANCED RAG ENGINE (CORE LOGIC)
+#  PHẦN 3: LOGIC LOAD SCHEMA (SỬ DỤNG REGEX TRÍCH XUẤT TỪ DDL)
 # =========================================================
 
-class RAGEngine:
-    def __init__(self):
-        self.schema_docs = [] # Lưu nội dung text full
-        self.bm25 = None      # Object tìm kiếm BM25
-        self.doc_map = {}     # Map index -> doc data
-        self.is_ready = False
+def load_all_schemas():
+    """
+    Load schema từ JSON. Vì JSON không có tableReference, ta dùng Regex 
+    để 'bóc' tên bảng đầy đủ từ chuỗi DDL.
+    """
+    global SCHEMA_DOCS
+    print("🚀 Đang nạp và xử lý DDL từ Schemas...")
 
-    def tokenize(self, text):
-        """
-        Kỹ thuật Tokenization chuyên cho SQL:
-        - Tách snake_case (user_id -> user, id)
-        - Tách camelCase
-        - Loại bỏ từ thừa (stopwords)
-        """
-        # Chuyển các ký tự đặc biệt thành dấu cách
-        text = re.sub(r'[\.\_\-\(\)\,]', ' ', str(text))
-        # Tách camelCase (e.g., camelCase -> camel Case)
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-        tokens = text.lower().split()
-        
-        # Stopwords SQL thông dụng không mang ý nghĩa định danh
-        stopwords = {
-            'string', 'int64', 'float', 'boolean', 'timestamp', 'date', 
-            'table', 'dataset', 'project', 'nullable', 'mode', 'type', 
-            'description', 'record', 'create', 'replace'
-        }
-        return [t for t in tokens if t not in stopwords and len(t) > 1]
+    if not os.path.exists(SCHEMA_FOLDER):
+        print(f"⚠️ Không tìm thấy thư mục {SCHEMA_FOLDER}")
+        return
 
-    def load_schemas(self):
-        print("🚀 Đang khởi tạo Advanced RAG Indexing...")
-        new_docs = []
-        tokenized_corpus = []
-        
-        if not os.path.exists(SCHEMA_FOLDER):
-            print("⚠️ Không tìm thấy folder schemas")
-            return
+    json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
+    schema_parts = []
 
-        json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
-        
-        for file_path in json_files:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    items = data if isinstance(data, list) else [data]
-
-                    for item in items:
-                        # --- SỬA ĐOẠN NÀY ĐỂ TRÁNH LỖI ".." ---
-                        table_ref = item.get('tableReference', {})
-                        dataset = table_ref.get('datasetId') or item.get('dataset_id', '')
-                        project = table_ref.get('projectId') or item.get('project_id', '')
-                        
-                        # Logic tạo prefix chuẩn: Nếu có project thì "project.dataset", ko thì chỉ "dataset"
-                        full_prefix = f"{project}.{dataset}" if project else dataset
-                        # ---------------------------------------
-
-                        doc_content = ""
-                        keywords_source = ""
-                        
-                        if 'table_name' in item:
-                            t_name = item['table_name']
-                            full_name = f"`{full_prefix}.{t_name}`" # <-- Sửa lại biến này
-                            
-                            cols_desc = []
-                            col_tokens = []
-                            
-                            raw_cols = item.get('columns', '[]')
-                            try:
-                                parsed = json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols
-                                if isinstance(parsed, list):
-                                    for col in parsed:
-                                        c_name = col if isinstance(col, str) else col.get('name')
-                                        c_desc = ""
-                                        if isinstance(col, dict) and 'description' in col:
-                                            c_desc = f"({col['description']})"
-                                        
-                                        cols_desc.append(f"- {c_name} {c_desc}")
-                                        col_tokens.append(f"{c_name} {c_desc}")
-                            except: pass
-
-                            # Bổ sung dòng nhắc nhở Dataset ID ngay trong content
-                            doc_content = f"[TABLE] {full_name}\n(Full ID: {full_name})\nColumns:\n" + "\n".join(cols_desc)
-                            keywords_source = f"{dataset} {t_name} {' '.join(col_tokens)}"
-
-                        elif 'routine_name' in item:
-                            r_name = item['routine_name']
-                            full_name = f"`{full_prefix}.{r_name}`" # <-- Sửa lại biến này
-                            definition = item.get('routine_definition', '')
-                            doc_content = f"[FUNCTION] {full_name}\nLogic:\n{definition}"
-                            keywords_source = f"{dataset} {r_name} {definition}"
-
-                        if doc_content:
-                            new_docs.append(doc_content)
-                            tokenized_corpus.append(self.tokenize(keywords_source))
-
-            except Exception as e:
-                print(f"Error loading {file_path}: {e}")
-
-        if tokenized_corpus:
-            self.bm25 = BM25Okapi(tokenized_corpus)
-            self.schema_docs = new_docs
-            self.is_ready = True
-            print(f"✅ Đã index {len(new_docs)} schemas với BM25.")
-        else:
-            print("⚠️ Không có dữ liệu để index.")
-
-    def query_expansion(self, user_query, api_key):
-        """
-        Kỹ thuật 'Query Expansion': Dùng AI nhỏ để dịch câu hỏi người dùng
-        sang các từ khóa Database tiềm năng trước khi search.
-        Ví dụ: "Tổng tiền bán hàng" -> "revenue sales total amount transaction"
-        """
+    for file_path in json_files:
         try:
-            client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
-            prompt = f"""You are a SQL search assistant. 
-            User Query: "{user_query}"
-            Task: List 5-10 technical database keywords (in English) related to this query.
-            Focus on synonyms for table names or column names (e.g., if user says "client", output "customer user account profile").
-            Output only the keywords separated by spaces. No explanation."""
-            
-            response = client.chat(
-                model=MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.0}
-            )
-            keywords = response['message']['content']
-            print(f"🔹 Expanded Query: {keywords}")
-            return keywords
-        except:
-            return user_query # Fallback nếu lỗi
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                items = data if isinstance(data, list) else [data]
 
-    def retrieve(self, query, expanded_query=None, top_k=10):
-        if not self.is_ready: return ""
-        
-        # Kết hợp query gốc và query mở rộng để tìm kiếm toàn diện
-        search_query = f"{query} {expanded_query}" if expanded_query else query
-        tokenized_query = self.tokenize(search_query)
-        
-        # BM25 Scoring
-        doc_scores = self.bm25.get_scores(tokenized_query)
-        
-        # Lấy top K indices
-        top_n = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)[:top_k]
-        
-        # Filter: Chỉ lấy những doc có score > 0 (tránh lấy rác nếu không khớp gì)
-        results = [self.schema_docs[i] for i in top_n if doc_scores[i] > 0]
-        
-        if not results:
-            print("⚠️ Không tìm thấy schema khớp, lấy default top 2.")
-            return "\n".join(self.schema_docs[:2])
-            
-        return "\n--------------------\n".join(results)
+                for item in items:
+                    # 1. XỬ LÝ TABLE / VIEW
+                    if 'table_name' in item and 'ddl' in item:
+                        ddl = item['ddl']
+                        table_name_short = item['table_name']
+                        
+                        # --- MAGIC REGEX ---
+                        # Tìm chuỗi nằm giữa dấu backtick (`) sau chữ TABLE hoặc VIEW
+                        # Pattern này bắt được: CREATE EXTERNAL TABLE `a.b.c` hoặc CREATE VIEW `a.b.c`
+                        match = re.search(r'CREATE.*?(?:TABLE|VIEW)\s+`([^`]+)`', ddl, re.IGNORECASE | re.DOTALL)
+                        
+                        if match:
+                            # Lấy được: kynaforkids-server-production.kynaforkids.Acc_LTV_CAC
+                            full_table_name = f"`{match.group(1)}`"
+                        else:
+                            # Fallback nếu DDL dị biệt (ít xảy ra với BigQuery export)
+                            full_table_name = f"`{table_name_short}`"
 
-# Khởi tạo RAG Engine
-rag_engine = RAGEngine()
-init_db()
-rag_engine.load_schemas()
+                        table_type = item.get('table_type', 'TABLE')
+                        
+                        cols = []
+                        raw_columns = item.get('columns')
+                        col_tokens = [] # Dùng để đánh index tìm kiếm
+                        
+                        if raw_columns:
+                            try:
+                                parsed_columns = json.loads(raw_columns)
+                                if isinstance(parsed_columns, list):
+                                    for col in parsed_columns:
+                                        # Xử lý trường hợp col là string hoặc dict
+                                        c_name = col if isinstance(col, str) else col.get('name')
+                                        cols.append(f"- `{c_name}`")
+                                        col_tokens.append(c_name)
+                            except: pass
+                        
+                        columns_block = "\n".join(cols)
+                        
+                        # Nội dung để AI đọc
+                        content_block = f"""
+                        [TABLE ENTITY]
+                        Table Name: {full_table_name}
+                        Table Type: {table_type}
+                        Source DDL:
+                        ```sql
+                        {ddl}
+                        ```
+                        COLUMNS:
+                        {columns_block}
+                        """
+                        
+                        # Dữ liệu để RAG đánh index (Full name + short name + columns)
+                        # clean_text giúp BM25 hiểu được các từ dính nhau bằng dấu chấm
+                        search_text = f"{full_table_name.replace('.', ' ')} {table_name_short} {' '.join(col_tokens)}"
+                        
+                        schema_parts.append({"text": content_block, "search_text": search_text})
+
+                    # 2. XỬ LÝ ROUTINE / FUNCTION
+                    elif 'routine_name' in item:
+                        # Tương tự, nếu Routine có DDL thì trích xuất, nếu không thì tự ghép
+                        routine_name = item.get('routine_name')
+                        ddl = item.get('ddl', '')
+                        definition = item.get('routine_definition', '')
+                        
+                        # Regex tìm tên function trong DDL
+                        match = re.search(r'CREATE.*?FUNCTION\s+`([^`]+)`', ddl, re.IGNORECASE | re.DOTALL)
+                        if match:
+                             full_routine_name = f"`{match.group(1)}`"
+                        else:
+                             full_routine_name = f"`{routine_name}`"
+
+                        content_block = f"""
+                        [LOGIC ROUTINE]
+                        Routine Name: {full_routine_name}
+                        Definition:
+                        {definition}
+                        """
+                        search_text = f"{full_routine_name.replace('.', ' ')} {definition}"
+                        schema_parts.append({"text": content_block, "search_text": search_text})
+
+        except Exception as e:
+            print(f"❌ Lỗi file {file_path}: {e}")
+
+    SCHEMA_DOCS = schema_parts
+    # Xây dựng Index ngay
+    build_rag_index()
 
 # =========================================================
-#  PHẦN 4: API ROUTES
+#  PHẦN 4: RAG ENGINE (BM25)
+# =========================================================
+
+def tokenize_query(text):
+    """Tách từ: xóa ký tự đặc biệt, tách camelCase, xóa stopword"""
+    text = re.sub(r'[\.\_\-\(\)\,\`]', ' ', str(text))
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    tokens = text.lower().split()
+    stopwords = {'create', 'table', 'view', 'select', 'external', 'float64', 'string', 'date'}
+    return [t for t in tokens if t not in stopwords]
+
+def build_rag_index():
+    global BM25_MODEL, SCHEMA_DOCS
+    if not SCHEMA_DOCS: return
+    
+    # Tokenize field 'search_text' ta đã chuẩn bị ở trên
+    tokenized_corpus = [tokenize_query(doc['search_text']) for doc in SCHEMA_DOCS]
+    BM25_MODEL = BM25Okapi(tokenized_corpus)
+    print(f"✅ Đã index {len(SCHEMA_DOCS)} schemas thành công.")
+
+def retrieve_schema_smart(question, top_k=5):
+    if not BM25_MODEL or not SCHEMA_DOCS: return ""
+    
+    tokenized_query = tokenize_query(question)
+    doc_scores = BM25_MODEL.get_scores(tokenized_query)
+    
+    # Lấy top k index có điểm cao nhất
+    top_indices = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)[:top_k]
+    
+    # Lọc bỏ những kết quả điểm = 0 (không liên quan tí nào)
+    results = [SCHEMA_DOCS[i]['text'] for i in top_indices if doc_scores[i] > 0]
+    
+    # Fallback: Nếu không tìm thấy gì, lấy đại 2 cái đầu (để AI không bị blank context)
+    if not results:
+        results = [d['text'] for d in SCHEMA_DOCS[:2]]
+        
+    return "\n--------------------\n".join(results)
+
+# Khởi tạo
+init_db()
+load_all_schemas()
+
+# =========================================================
+#  PHẦN 5: API ROUTES
 # =========================================================
 
 @app.route('/')
@@ -266,8 +263,7 @@ def clear_history():
         Session.query.delete()
         db.session.commit()
         return jsonify({"status": "success"})
-    except:
-        return jsonify({"status": "error"}), 500
+    except: return jsonify({"error": "err"}), 500
 
 @app.route("/api/session/<session_id>", methods=["DELETE"])
 def delete_session(session_id):
@@ -276,13 +272,12 @@ def delete_session(session_id):
         Session.query.filter_by(id=session_id).delete()
         db.session.commit()
         return jsonify({"status": "success"})
-    except:
-        return jsonify({"status": "error"}), 500
+    except: return jsonify({"error": "err"}), 500
 
 @app.route('/api/reload', methods=['POST'])
-def reload_schema():
-    rag_engine.load_schemas()
-    return jsonify({"status": "success", "message": "RAG Index Rebuilt!"})
+def reload_schema_api():
+    load_all_schemas()
+    return jsonify({"status": "success", "message": "Schemas reloaded!"})
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -294,64 +289,57 @@ def chat():
     if not api_key or not session_id:
         return jsonify({"error": "Missing info"}), 400
 
+    # 1. RETRIEVAL (BM25)
+    retrieved_context = retrieve_schema_smart(user_msg, top_k=5)
+
     create_session_if_not_exists(session_id, user_msg)
     save_message(session_id, "user", user_msg)
 
-    try:
-        # BƯỚC 1: QUERY EXPANSION (Làm giàu ngữ nghĩa)
-        # Nếu câu hỏi quá ngắn, AI sẽ giúp đoán các bảng liên quan
-        expanded_keywords = rag_engine.query_expansion(user_msg, api_key)
-        
-        # BƯỚC 2: BM25 RETRIEVAL (Tìm kiếm chính xác cao)
-        # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
-        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
+    # 2. PROMPT
+    # Lưu ý: Phần Prompt này nhấn mạnh việc COPY tên bảng từ context
+    system_prompt = f"""Role: BigQuery SQL Expert.
+Nhiệm vụ: Chuyển câu hỏi người dùng thành câu lệnh SQL Standard.
 
-        # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
-        system_prompt = f"""Role: Senior BigQuery SQL Architect.
-Goal: Generate optimized Standard SQL queries based strictly on the provided schema.
+[DATABASE SCHEMA - RELEVANT CONTEXT]:
+{retrieved_context}
 
-[CONTEXT - RELEVANT SCHEMAS]:
-{relevant_schemas}
-
-[GUIDELINES]:
-1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT] (e.g., `project-id.dataset.table`). Do not hallucinate columns. 
-    - ❌ WRONG: `..table`, `dataset.table` (if project exists).
-    - ✅ RIGHT: Copy the `[TABLE] name` exactly from the context block.
-2. **Expansion Context**: The user query might use business terms. Map them to the technical column names found in the schema.
-3. **Logic Handling**: If a [FUNCTION] or Routine is present in context, use its logic (CASE WHEN...) to filter data correctly (e.g., status codes).
-4. **Syntax**: Use Google Standard SQL (BigQuery) syntax. usage of backticks (`) for table names is mandatory (Project.Dataset.Table).
-5. **Output**: Return ONLY the SQL code inside ```sql ... ``` block. Brief explanation of the query is optional after the code block.
+[QUY TẮC BẮT BUỘC]:
+1. **FULL NAME ONLY**: Phải dùng tên bảng đầy đủ CHÍNH XÁC như trong phần 'Table Name:' ở trên (ví dụ: `project.dataset.table`).
+   - Tuyệt đối KHÔNG dùng tên viết tắt kiểu `..table` hay `.table`.
+   - Nếu trong schema ghi `UnknownDataset.table`, hãy dùng y nguyên `UnknownDataset.table`.
+2. **Logic Mapping**: Đọc kỹ phần [LOGIC ROUTINE] (nếu có) để map các trạng thái (status, type) sang số/mã tương ứng trong WHERE clause.
+3. **Syntax**: Dùng Google Standard SQL.
 
 User Question: {user_msg}
+
+[ĐỊNH DẠNG TRẢ VỀ]:
+Chỉ trả về code SQL trong ```sql ... ```. Sau khi trả kết quả SQL nên có thêm phần giải thích ngắn gọn.
 """
 
-        messages_payload = [{"role": "system", "content": system_prompt}]
-        history = get_chat_history_formatted(session_id, limit=6)
-        
-        for msg in history:
-            if msg['content'] != user_msg: # Tránh duplicate
-                messages_payload.append(msg)
-        
-        messages_payload.append({"role": "user", "content": user_msg})
+    messages_payload = [{"role": "system", "content": system_prompt}]
+    history = get_chat_history_formatted(session_id, limit=6)
+    for msg in history:
+        if msg['content'] != user_msg:
+            messages_payload.append(msg)
+    messages_payload.append({"role": "user", "content": user_msg})
 
+    try:
         client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
         response = client.chat(
             model=MODEL_NAME,
             messages=messages_payload,
             stream=False,
-            options={"temperature": 0.1} # Nhiệt độ thấp để code chính xác
+            options={"temperature": 0.0}
         )
-        
         reply = response['message']['content']
         save_message(session_id, "assistant", reply)
         return jsonify({"response": reply})
 
     except Exception as e:
-        print(f"Chat Error: {e}")
+        print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Init DB & RAG trước khi run app
     init_db()
-    rag_engine.load_schemas()
+    load_all_schemas()
     app.run(debug=True, port=5000)
