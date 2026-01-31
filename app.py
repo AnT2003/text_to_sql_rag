@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-flash-preview:latest"
+MODEL_NAME = "ggpt-oss:120b-cloud"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -233,7 +233,7 @@ class RAGEngine:
             response = client.chat(
                 model=MODEL_NAME,
                 messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.0}
+                options={"temperature": 0.0,"top_p": 0.85,"repeat_penalty": 1.15}
             )
             keywords = response['message']['content']
             print(f"🔹 Expanded Query: {keywords}")
@@ -241,7 +241,7 @@ class RAGEngine:
         except:
             return user_query # Fallback nếu lỗi
 
-    def retrieve(self, query, expanded_query=None, top_k=10):
+    def retrieve(self, query, expanded_query=None, top_k=15):
         if not self.is_ready: return ""
         
         # Kết hợp query gốc và query mở rộng để tìm kiếm toàn diện
@@ -330,7 +330,7 @@ def chat():
         
         # BƯỚC 2: BM25 RETRIEVAL (Tìm kiếm chính xác cao)
         # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
-        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
+        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=15)
 
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
         system_prompt = f"""Role: Senior BigQuery SQL Architect.
@@ -363,7 +363,7 @@ User Question: {user_msg}
             model=MODEL_NAME,
             messages=messages_payload,
             stream=False,
-            options={"temperature": 0.1} # Nhiệt độ thấp để code chính xác
+            options={"temperature": 0.0,"top_p": 0.85,"repeat_penalty": 1.15} # Nhiệt độ thấp để code chính xác
         )
         
         reply = response['message']['content']
