@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-flash-preview:cloud"
+MODEL_NAME = "gemini-3-flash-preview:latest"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -233,7 +233,7 @@ class RAGEngine:
             response = client.chat(
                 model=MODEL_NAME,
                 messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.0,"top_p": 0.85,"repeat_penalty": 1.15}
+                options={"temperature": 0.0}
             )
             keywords = response['message']['content']
             print(f"🔹 Expanded Query: {keywords}")
@@ -241,7 +241,7 @@ class RAGEngine:
         except:
             return user_query # Fallback nếu lỗi
 
-    def retrieve(self, query, expanded_query=None, top_k=15):
+    def retrieve(self, query, expanded_query=None, top_k=10):
         if not self.is_ready: return ""
         
         # Kết hợp query gốc và query mở rộng để tìm kiếm toàn diện
@@ -330,7 +330,7 @@ def chat():
         
         # BƯỚC 2: BM25 RETRIEVAL (Tìm kiếm chính xác cao)
         # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
-        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=15)
+        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
 
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
         system_prompt = f"""Role: Senior BigQuery SQL Architect.
@@ -340,12 +340,11 @@ Goal: Generate optimized Standard SQL queries based strictly on the provided sch
 {relevant_schemas}
 
 [GUIDELINES]:
-1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT]. Do not hallucinate columns.
-2. **Expansion Context**: The user query might use business terms. Map them to the technical column names found in the schema.
-3. **Logic Handling**: If a [FUNCTION] or Routine is present in context, use its logic (CASE WHEN...) to filter data correctly (e.g., status codes).
-4. **Syntax**: Use Google Standard SQL (BigQuery) syntax. usage of backticks (`) for table names is mandatory (Project.Dataset.Table).
-5. **Output**: Return ONLY the SQL code inside ```sql ... ``` block. Brief explanation of the query is optional after the code block.
-
+1. **Source of Truth**: Use ONLY the tables, columns, and routines explicitly provided in [CONTEXT]. Any table, column, or function not present in [CONTEXT] MUST NOT be used or assumed.
+2. **Expansion Context**: Business terms in the user query may ONLY be mapped to technical column names that exist verbatim in the provided schema. If no valid mapping exists, do NOT generate SQL.
+3. **Logic Handling**: If a [FUNCTION] or Routine is present in [CONTEXT], you MUST reuse its logic exactly as defined. Do NOT re-implement, simplify, or invent CASE WHEN logic.
+4. **Syntax**: Use Google Standard SQL (BigQuery). Fully qualified table names with backticks (`Project.Dataset.Table`) are mandatory.
+5. **Output**: Return ONLY valid SQL wrapped inside ```sql ... ```. Do NOT include explanations or any output outside the SQL block.
 User Question: {user_msg}
 """
 
@@ -363,7 +362,7 @@ User Question: {user_msg}
             model=MODEL_NAME,
             messages=messages_payload,
             stream=False,
-            options={"temperature": 0.0,"top_p": 0.85,"repeat_penalty": 1.15} # Nhiệt độ thấp để code chính xác
+            options={"temperature": 0.1} # Nhiệt độ thấp để code chính xác
         )
         
         reply = response['message']['content']
@@ -379,7 +378,3 @@ if __name__ == '__main__':
     init_db()
     rag_engine.load_schemas()
     app.run(debug=True, port=5000)
-
-
-
-
