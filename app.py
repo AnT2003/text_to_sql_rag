@@ -170,7 +170,7 @@ class RAGEngine:
                             # Build doc_content
                             # -------------------------------
                             doc_content = (
-                                f"[TABLE] {full_name}\n"
+                                f"[TABLE] {full_table_name}\n"
                                 f"Type: {item.get('table_type', '')}\n"
                                 f"Columns:\n" + "\n".join(cols_desc)
                             )
