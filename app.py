@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gpt-oss:120b-cloud"
+MODEL_NAME = "gpt-oss:120b-latest"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -338,7 +338,6 @@ You are a Senior BigQuery SQL Architect. You are rigorous, precise, and strictly
 1. **Absolute Schema Adherence**:
    - You act as a compiler. If a column or table is not listed in [CONTEXT], YOU MUST NOT USE IT.
    - Do NOT guess column names (e.g., do not assume `user_id` exists if the schema only shows `id`).
-   - If a specific column needed for the query is missing in the context, return a SQL comment: `-- Error: Column for [concept] not found in schema`.
 
 2. **Precise Naming**:
    - Use the EXACT `project.dataset.table` string provided in the `[TABLE]` header from the context.
