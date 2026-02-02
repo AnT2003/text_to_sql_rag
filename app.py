@@ -141,20 +141,14 @@ class RAGEngine:
                             table_name = item.get("table_name", "")
                             ddl = item.get("ddl", "")
 
-                            # -------------------------------
-                            # Extract full table name from DDL
-                            # -------------------------------
-                            # Match: `project.dataset.table`
-                            project = dataset = ""
+                            dataset_id = item.get('table_schema')
+                            project_id = 'kynaforkids-server-production'
 
-                            match = re.search(r'(?:TABLE|VIEW)\s+`([^`]+)`', ddl, re.IGNORECASE)
+                            # Prefix đầy đủ: `project.dataset` hoặc `dataset`
+                            full_prefix = f"{project_id}.{dataset_id}" if project_id else dataset_id
                             
-                            if match:
-                                full_table_name = f"`{match.group(1)}`" # output: `project.dataset.table`
-                            else:
-                                # Fallback an toàn: cố gắng tìm chuỗi có dạng a.b.c trong toàn bộ DDL
-                                match_loose = re.search(r'`([\w\-]+\.[\w\-]+\.[\w\-]+)`', ddl)
-                                full_table_name = match_loose.group(0) if match_loose else f"`UnknownProject.UnknownDataset.{table_name}`"
+                            table_name = item['table_name']
+                            full_table_name = f"`{full_prefix}.{table_name}`"
 
                             # -------------------------------
                             # Parse columns (JSON string)
@@ -184,7 +178,7 @@ class RAGEngine:
                             # -------------------------------
                             # Build keywords source (for index)
                             # -------------------------------
-                            keywords_source = f"{project} {dataset} {full_table_name} " + " ".join(col_tokens)
+                            keywords_source = f"{full_table_name} " + " ".join(col_tokens)
 
 
                         elif 'routine_name' in item:
@@ -198,7 +192,7 @@ class RAGEngine:
                             full_name = f"`{match.group(1)}`" if match else f"`{short_name}`"
                             definition = item.get('routine_definition', '')
                             doc_content = f"[FUNCTION] {full_name}\nLogic:\n{definition}"
-                            keywords_source = f"{dataset} {r_name} {definition}"
+                            keywords_source = f"{full_name} {definition}"
 
                         if doc_content:
                             new_docs.append(doc_content)
@@ -340,11 +334,12 @@ Goal: Generate optimized Standard SQL queries based strictly on the provided sch
 {relevant_schemas}
 
 [GUIDELINES]:
-1. **Source of Truth**: Use ONLY the tables, columns, and routines explicitly provided in [CONTEXT]. Any table, column, or function not present in [CONTEXT] MUST NOT be used or assumed.
-2. **Expansion Context**: Business terms in the user query may ONLY be mapped to technical column names that exist verbatim in the provided schema. If no valid mapping exists, do NOT generate SQL.
-3. **Logic Handling**: If a [FUNCTION] or Routine is present in [CONTEXT], you MUST reuse its logic exactly as defined. Do NOT re-implement, simplify, or invent CASE WHEN logic.
-4. **Syntax**: Use Google Standard SQL (BigQuery). Fully qualified table names with backticks (`Project.Dataset.Table`) are mandatory.
-5. **Output**: Return ONLY valid SQL wrapped inside ```sql ... ```. Do NOT include explanations or any output outside the SQL block.
+1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT]. Do not hallucinate columns.
+2. **Expansion Context**: The user query might use business terms. Map them to the technical column names found in the schema.
+3. **Logic Handling**: If a [FUNCTION] or Routine is present in context, use its logic (CASE WHEN...) to filter data correctly (e.g., status codes). You MUST reuse its logic exactly as defined. Do NOT re-implement, simplify, or invent CASE WHEN logic.
+4. **Syntax**: Use Google Standard SQL (BigQuery) syntax. usage of backticks (`) for table names is mandatory (Project.Dataset.Table).
+5. **Output**: Return ONLY the SQL code inside ```sql ... ``` block. Brief explanation of the query is optional after the code block.
+
 User Question: {user_msg}
 """
 
