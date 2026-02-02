@@ -333,13 +333,25 @@ Goal: Generate optimized Standard SQL queries based strictly on the provided sch
 [CONTEXT - RELEVANT SCHEMAS]:
 {relevant_schemas}
 
-[GUIDELINES]:
-1. **Source of Truth**: Use ONLY the tables/columns provided in [CONTEXT]. Do not hallucinate columns.
-2. **Expansion Context**: The user query might use business terms. Map them to the technical column names found in the schema.
-3. **Logic Handling**: If a [FUNCTION] or Routine is present in context, use its logic (CASE WHEN...) to filter data correctly (e.g., status codes). You MUST reuse its logic exactly as defined. Do NOT re-implement, simplify, or invent CASE WHEN logic.
-4. **Syntax**: Use Google Standard SQL (BigQuery) syntax. usage of backticks (`) for table names is mandatory (Project.Dataset.Table).
-5. **Output**: Return ONLY the SQL code inside ```sql ... ``` block. Brief explanation of the query is optional after the code block.
+[NGUYÊN TẮC BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM]:
+1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [TABLE]. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
+2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
+3. **Mapping Logic:**
+   - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [FUNCTION] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
+   - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
+   - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
+   - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
+4. **Kỹ thuật BigQuery:**
+   - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
+   - ✅ Dùng JOIN kết hợp GROUP BY nếu cần.
+   - Nên sử dụng CTE thay vì truy vấn lồng nhau để tăng hiệu suất.
+   - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
 
+[ĐỊNH DẠNG TRẢ VỀ]:
+
+1. Chỉ trả về code SQL trong ```sql ... ```.
+
+2. Có thể giải thích ngắn gọn về query sau phần code.
 User Question: {user_msg}
 """
 
@@ -373,4 +385,3 @@ if __name__ == '__main__':
     init_db()
     rag_engine.load_schemas()
     app.run(debug=True, port=5000)
-
