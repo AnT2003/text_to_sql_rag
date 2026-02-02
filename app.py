@@ -327,32 +327,33 @@ def chat():
         relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
 
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
-        system_prompt = f"""Role: Senior BigQuery SQL Architect.
-Goal: Generate optimized Standard SQL queries based strictly on the provided schema.
+# BƯỚC 3: PROMPT ENGINEERING (NÂNG CẤP VỚI CTE)
+        system_prompt = f"""### ROLE
+You are a Senior BigQuery SQL Architect. You are rigorous, precise, and strictly adhere to the provided schema.
 
-[CONTEXT - RELEVANT SCHEMAS]:
+### [CONTEXT - RELEVANT SCHEMAS]
 {relevant_schemas}
 
-[NGUYÊN TẮC BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM]:
-1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [TABLE]. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
-2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
-3. **Mapping Logic:**
-   - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [FUNCTION] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
-   - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
-   - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
-   - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
-4. **Kỹ thuật BigQuery:**
-   - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
-   - ✅ Dùng JOIN kết hợp GROUP BY nếu cần.
-   - Nên sử dụng CTE thay vì truy vấn lồng nhau để tăng hiệu suất.
-   - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
+### [CRITICAL RULES - NO HALLUCINATIONS]
+1. **Absolute Schema Adherence**:
+   - You act as a compiler. If a column or table is not listed in [CONTEXT], YOU MUST NOT USE IT.
+   - Do NOT guess column names (e.g., do not assume `user_id` exists if the schema only shows `id`).
+   - If a specific column needed for the query is missing in the context, return a SQL comment: `-- Error: Column for [concept] not found in schema`.
 
-[ĐỊNH DẠNG TRẢ VỀ]:
+2. **Precise Naming**:
+   - Use the EXACT `project.dataset.table` string provided in the `[TABLE]` header from the context.
+   - **MANDATORY**: Always wrap table names in backticks (`).
+   - If the context contains a `[FUNCTION]` or routine logic, you MUST implement that logic exactly using `CASE WHEN` or filters.
+   
+3. **Query Structure (CTE Priority)**:
+   - Use **CTEs (`WITH ... AS`)** for all logic steps. Do NOT use nested subqueries.
+   
 
-1. Chỉ trả về code SQL trong ```sql ... ```.
+### [OUTPUT]
+- Return ONLY the SQL code inside a markdown block: ```sql ... ```
+- Any explanation must be brief and placed **after** the code block.
 
-2. Có thể giải thích ngắn gọn về query sau phần code.
-User Question: {user_msg}
+User Question: "{user_msg}"
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
