@@ -1,23 +1,38 @@
 import os
+
 import json
+
 import glob
+
 import datetime
+
 import re
+
 from flask import Flask, render_template, request, jsonify
+
 from dotenv import load_dotenv
+
 from ollama import Client
+
 from flask_cors import CORS
+
 from flask_sqlalchemy import SQLAlchemy
+
 from sqlalchemy import desc
+
 from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
+
+
 
 # =========================================================
 #  PHẦN 1: CONFIG & SETUP
 # =========================================================
 
+
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
+
 
 db_url = os.getenv("DATABASE_URL")
 if not db_url:
@@ -25,25 +40,31 @@ if not db_url:
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
+
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url  
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+
 db = SQLAlchemy(app)
+
 
 OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
+
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
 # =========================================================
+
 
 class Session(db.Model):
     __tablename__ = 'sessions'
     id = db.Column(db.String(50), primary_key=True)
     title = db.Column(db.String(200))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
 
 class Message(db.Model):
     __tablename__ = 'messages'
@@ -53,9 +74,11 @@ class Message(db.Model):
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
+
 def init_db():
     with app.app_context():
         db.create_all()
+
 
 def save_message(session_id, role, content):
     try:
@@ -64,6 +87,7 @@ def save_message(session_id, role, content):
         db.session.commit()
     except:
         db.session.rollback()
+
 
 def create_session_if_not_exists(session_id, first_msg):
     try:
@@ -74,6 +98,7 @@ def create_session_if_not_exists(session_id, first_msg):
     except:
         db.session.rollback()
 
+
 def get_chat_history_formatted(session_id, limit=10):
     try:
         msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
@@ -81,9 +106,11 @@ def get_chat_history_formatted(session_id, limit=10):
     except:
         return []
 
+
 # =========================================================
 #  PHẦN 3: ADVANCED RAG ENGINE (CORE LOGIC)
 # =========================================================
+
 
 class RAGEngine:
     def __init__(self):
@@ -91,6 +118,7 @@ class RAGEngine:
         self.bm25 = None      # Object tìm kiếm BM25
         self.doc_map = {}     # Map index -> doc data
         self.is_ready = False
+
 
     def tokenize(self, text):
         """
@@ -113,10 +141,13 @@ class RAGEngine:
         }
         return [t for t in tokens if t not in stopwords and len(t) > 1]
 
+
     def load_schemas(self):
         print("🚀 Đang khởi tạo Advanced RAG Indexing...")
         new_docs = []
         tokenized_corpus = []
+        # reset doc_map each time reload
+        self.doc_map = {}
         
         if not os.path.exists(SCHEMA_FOLDER):
             print("⚠️ Không tìm thấy folder schemas")
@@ -131,12 +162,16 @@ class RAGEngine:
                     data = json.load(f)
                     items = data if isinstance(data, list) else [data]
 
+
                     for item in items:
                         # ===============================
                         # Build Document Content
                         # ===============================
                         doc_content = ""
                         keywords_source = ""
+                        is_view = False
+                        full_table_name = None
+
                         if 'table_name' in item:
                             table_name = item.get("table_name", "")
                             ddl = item.get("ddl", "")
@@ -149,6 +184,7 @@ class RAGEngine:
                             
                             table_name = item['table_name']
                             full_table_name = f"`{full_prefix}.{table_name}`"
+
 
                             # -------------------------------
                             # Parse columns (JSON string)
@@ -166,6 +202,7 @@ class RAGEngine:
                             except Exception:
                                 pass
 
+
                             # -------------------------------
                             # Build doc_content
                             # -------------------------------
@@ -175,10 +212,16 @@ class RAGEngine:
                                 f"Columns:\n" + "\n".join(cols_desc)
                             )
 
+                            # detect if this schema entry is a VIEW
+                            table_type = str(item.get('table_type', '')).lower()
+                            if 'view' in table_type:
+                                is_view = True
+
                             # -------------------------------
                             # Build keywords source (for index)
                             # -------------------------------
                             keywords_source = f"{full_table_name} " + " ".join(col_tokens)
+
 
 
                         elif 'routine_name' in item:
@@ -187,19 +230,31 @@ class RAGEngine:
                             ddl = item.get('ddl', '')
                             definition = item.get('routine_definition', '')
 
+
                             # Regex bắt tên function
                             match = re.search(r'FUNCTION\s+`([^`]+)`', ddl, re.IGNORECASE)
                             full_name = f"`{match.group(1)}`" if match else f"`{short_name}`"
                             definition = item.get('routine_definition', '')
                             doc_content = f"[FUNCTION] {full_name}\nLogic:\n{definition}"
                             keywords_source = f"{full_name} {definition}"
+                            is_view = False
+
 
                         if doc_content:
                             new_docs.append(doc_content)
                             tokenized_corpus.append(self.tokenize(keywords_source))
+                            # record metadata for this doc (index after append)
+                            idx = len(new_docs) - 1
+                            self.doc_map[idx] = {
+                                'is_view': bool(is_view),
+                                'full_table_name': full_table_name,
+                                'type': item.get('table_type', '')
+                            }
+
 
             except Exception as e:
                 print(f"Error loading {file_path}: {e}")
+
 
         # KHỞI TẠO BM25 INDEX
         if tokenized_corpus:
@@ -210,12 +265,14 @@ class RAGEngine:
         else:
             print("⚠️ Không có dữ liệu để index.")
 
+
     def query_expansion(self, user_query, api_key):
         """
         Kỹ thuật 'Query Expansion': Dùng AI nhỏ để dịch câu hỏi người dùng
         sang các từ khóa Database tiềm năng trước khi search.
         Ví dụ: "Tổng tiền bán hàng" -> "revenue sales total amount transaction"
         """
+
         try:
             client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
             prompt = f"""You are a SQL search assistant. 
@@ -235,6 +292,7 @@ class RAGEngine:
         except:
             return user_query # Fallback nếu lỗi
 
+
     def retrieve(self, query, expanded_query=None, top_k=10):
         if not self.is_ready: return ""
         
@@ -245,11 +303,23 @@ class RAGEngine:
         # BM25 Scoring
         doc_scores = self.bm25.get_scores(tokenized_query)
         
-        # Lấy top K indices
-        top_n = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)[:top_k]
-        
-        # Filter: Chỉ lấy những doc có score > 0 (tránh lấy rác nếu không khớp gì)
-        results = [self.schema_docs[i] for i in top_n if doc_scores[i] > 0]
+        # Sort all indices by score desc
+        sorted_indices = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)
+
+        # Prefer TABLE docs over VIEW docs strictly: take tables first, then fill with views if needed
+        table_indices = [i for i in sorted_indices if self.doc_map.get(i, {}).get('is_view') == False and doc_scores[i] > 0]
+        view_indices = [i for i in sorted_indices if self.doc_map.get(i, {}).get('is_view') == True and doc_scores[i] > 0]
+
+        results_indices = []
+        if table_indices:
+            results_indices.extend(table_indices[:top_k])
+        if len(results_indices) < top_k:
+            # Fill remaining slots with views (if any)
+            needed = top_k - len(results_indices)
+            results_indices.extend(view_indices[:needed])
+
+        # Build results preserving order
+        results = [self.schema_docs[i] for i in results_indices]
         
         if not results:
             print("⚠️ Không tìm thấy schema khớp, lấy default top 2.")
@@ -257,27 +327,33 @@ class RAGEngine:
             
         return "\n--------------------\n".join(results)
 
+
 # Khởi tạo RAG Engine
 rag_engine = RAGEngine()
 init_db()
 rag_engine.load_schemas()
 
+
 # =========================================================
 #  PHẦN 4: API ROUTES
 # =========================================================
 
+
 @app.route('/')
 def index():
     return render_template('index.html')
+
 
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
     sessions = Session.query.order_by(desc(Session.created_at)).all()
     return jsonify([{'id': s.id, 'title': s.title} for s in sessions])
 
+
 @app.route('/api/history/<session_id>', methods=['GET'])
 def get_history(session_id):
     return jsonify(get_chat_history_formatted(session_id, limit=50))
+
 
 @app.route('/api/clear_history', methods=['POST'])
 def clear_history():
@@ -289,6 +365,7 @@ def clear_history():
     except:
         return jsonify({"status": "error"}), 500
 
+
 @app.route("/api/session/<session_id>", methods=["DELETE"])
 def delete_session(session_id):
     try:
@@ -299,10 +376,12 @@ def delete_session(session_id):
     except:
         return jsonify({"status": "error"}), 500
 
+
 @app.route('/api/reload', methods=['POST'])
 def reload_schema():
     rag_engine.load_schemas()
     return jsonify({"status": "success", "message": "RAG Index Rebuilt!"})
+
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -311,11 +390,14 @@ def chat():
     user_msg = data.get('message')
     session_id = data.get('session_id')
 
+
     if not api_key or not session_id:
         return jsonify({"error": "Missing info"}), 400
 
+
     create_session_if_not_exists(session_id, user_msg)
     save_message(session_id, "user", user_msg)
+
 
     try:
         # BƯỚC 1: QUERY EXPANSION (Làm giàu ngữ nghĩa)
@@ -326,34 +408,51 @@ def chat():
         # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
         relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
 
+
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
         system_prompt = f"""Role: Senior BigQuery SQL Architect.
-Goal: Generate optimized Standard SQL queries based strictly on the provided schema.
+        Goal: Generate optimized Standard SQL queries based strictly on the provided schema.
 
-[CONTEXT - RELEVANT SCHEMAS]:
-{relevant_schemas}
 
-[NGUYÊN TẮC BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM]:
-1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [TABLE]. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
-2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
-3. **Mapping Logic:**
-   - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [FUNCTION] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
-   - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
-   - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
-   - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
-4. **Kỹ thuật BigQuery:**
-   - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
-   - ✅ Dùng JOIN kết hợp GROUP BY nếu cần.
-   - Nên sử dụng CTE thay vì truy vấn lồng nhau để tăng hiệu suất.
-   - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
+        [CONTEXT - RELEVANT SCHEMAS]:
+        {relevant_schemas}
 
-[ĐỊNH DẠNG TRẢ VỀ]:
 
-1. Chỉ trả về code SQL trong ```sql ... ```.
+        [NGUYÊN TẮC BẮT BUỘC - KHÔNG ĐƯỢC VI PHẠM]:
+        1. **Nguồn sự thật duy nhất:** Chỉ được sử dụng các bảng và cột được liệt kê trong phần [TABLE]. KHÔNG ĐƯỢC TỰ BỊA TÊN CỘT (như created_at, id, name) nếu schema không có.
+        2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
+        3. **Mapping Logic:**
 
-2. Có thể giải thích ngắn gọn về query sau phần code.
-User Question: {user_msg}
-"""
+           - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [FUNCTION] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
+
+           - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
+
+           - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
+
+           - Routine chỉ được dùng trong SELECT / WHERE, không dùng trong FROM.
+
+        4. **Kỹ thuật BigQuery:**
+
+           - ❌ KHÔNG dùng Correlated Subqueries (Subquery phụ thuộc bảng ngoài).
+
+           - ✅ Dùng JOIN kết hợp GROUP BY nếu cần.
+
+           - Nên sử dụng CTE thay vì truy vấn lồng nhau để tăng hiệu suất.
+
+           - Phải sử dụng các hàm, syntax theo chuẩn cấu trúc của BigQuery.
+
+
+        [ĐỊNH DẠNG TRẢ VỀ]:
+
+
+        1. Chỉ trả về code SQL trong ```sql ... ```.
+
+
+        2. Có thể giải thích ngắn gọn về query sau phần code.
+        User Question: {user_msg}
+
+        """
+
 
         messages_payload = [{"role": "system", "content": system_prompt}]
         history = get_chat_history_formatted(session_id, limit=6)
@@ -376,9 +475,11 @@ User Question: {user_msg}
         save_message(session_id, "assistant", reply)
         return jsonify({"response": reply})
 
+
     except Exception as e:
         print(f"Chat Error: {e}")
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     # Init DB & RAG trước khi run app
