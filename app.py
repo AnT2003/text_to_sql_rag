@@ -32,7 +32,7 @@ db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
 # Lưu ý: Nên dùng model chuyên code như qwen2.5-coder hoặc deepseek-coder nếu có thể
-MODEL_NAME = "gpt-oss:latest" 
+MODEL_NAME = "gpt-oss:120b" 
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -447,5 +447,6 @@ User Question: {user_msg} """
         return jsonify({"error": str(e)}), 500
 if __name__ == '__main__': # Init DB & RAG khi chạy local init_db() rag_engine.load_schemas() 
     app.run(debug=True, port=5000)
+
 
 
