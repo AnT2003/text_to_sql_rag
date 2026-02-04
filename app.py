@@ -38,7 +38,6 @@ OLLAMA_HOST = os.getenv("OLLAMA_HOST") or "https://ollama.com"
 MODEL_NAME = os.getenv("MODEL_NAME") or "gemini-3-flash-preview:latest"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = os.getenv("SCHEMA_FOLDER") or "./schemas"
-PROJECT_ID = os.getenv("PROJECT_ID") or "kynaforkids-server-production"
 
 # =========================================================
 # DB MODELS
@@ -137,7 +136,7 @@ class RAGEngine:
                 if 'table_name' in item:
                     table = item.get('table_name')
                     dataset = item.get('table_schema') or item.get('dataset') or ''
-                    project = item.get('project') or PROJECT_ID
+                    project = 'kynaforkids-server-production'
 
                     ddl = item.get('ddl','') or ''
                     m = re.search(r'`([^`]+)\.([^`]+)\.([^`]+)`', ddl)
