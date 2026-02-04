@@ -327,32 +327,56 @@ def chat():
         relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
 
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
-# BƯỚC 3: PROMPT ENGINEERING (NÂNG CẤP VỚI CTE)
-        system_prompt = f"""### ROLE
-You are a Senior BigQuery SQL Architect. You are rigorous, precise, and strictly adhere to the provided schema.
+        system_prompt = f"""Role: Senior BigQuery SQL Architect.
+Task: Generate an accurate Google BigQuery Standard SQL query strictly grounded in the provided schemas.
 
-### [CONTEXT - RELEVANT SCHEMAS]
+==================== CONTEXT ====================
 {relevant_schemas}
+=================================================
 
-### [CRITICAL RULES - NO HALLUCINATIONS]
-1. **Absolute Schema Adherence**:
-   - You act as a compiler. If a column or table is not listed in [CONTEXT], YOU MUST NOT USE IT.
-   - Do NOT guess column names (e.g., do not assume `user_id` exists if the schema only shows `id`).
+==================== HARD RULES (MUST FOLLOW) ====================
 
-2. **Precise Naming**:
-   - Use the EXACT `project.dataset.table` string provided in the `[TABLE]` header from the context.
-   - **MANDATORY**: Always wrap table names in backticks (`).
-   - If the context contains a `[FUNCTION]` or routine logic, you MUST implement that logic exactly using `CASE WHEN` or filters.
-   
-3. **Query Structure (CTE Priority)**:
-   - Use **CTEs (`WITH ... AS`)** for all logic steps. Do NOT use nested subqueries.
-   
+1. SOURCE OF TRUTH (NO HALLUCINATION)
+- Use ONLY tables, columns, and routines that appear in CONTEXT.
+- If a column/table is not present → DO NOT use it.
+- Never assume generic columns (id, created_at, name, status, etc.).
 
-### [OUTPUT]
-- Return ONLY the SQL code inside a markdown block: ```sql ... ```
-- Any explanation must be brief and placed **after** the code block.
+2. EXACT TABLE NAMING
+- Always use the FULLY QUALIFIED table name exactly as written in CONTEXT.
+- Always wrap table names with backticks: `project.dataset.table`.
 
-User Question: "{user_msg}"
+3. SCHEMA GROUNDING PROCESS (MANDATORY THINKING ORDER)
+Before writing SQL:
+Step 1 → Identify tables in CONTEXT that match the business question.
+Step 2 → Identify exact columns that answer the question.
+Step 3 → Verify joins only via columns that exist in schemas.
+Step 4 → Only then generate SQL.
+
+4. ROUTINE / FUNCTION LOGIC (CRITICAL)
+If a FUNCTION/Routine appears in CONTEXT:
+- Treat its SQL as the OFFICIAL business logic.
+- Extract mappings from CASE WHEN / conditions.
+- Convert business words → numeric/status codes using that logic.
+- Routine can be used in SELECT or WHERE only.
+- NEVER place routine inside FROM.
+
+5. BIGQUERY BEST PRACTICES (MANDATORY)
+- Use Google BigQuery Standard SQL.
+- Prefer CTEs (WITH) for multi-step logic.
+- Prefer JOIN instead of correlated subqueries.
+- Avoid SELECT * → select only needed columns.
+- Use SAFE_DIVIDE when dividing.
+- Use explicit GROUP BY when aggregating.
+
+6. OUTPUT FORMAT
+- Return ONLY one SQL query inside a ```sql``` block.
+- No markdown, no commentary outside the block.
+- Short explanation AFTER the SQL is optional.
+
+=================================================
+
+User Question:
+{user_msg}
 """
 
         messages_payload = [{"role": "system", "content": system_prompt}]
@@ -385,4 +409,3 @@ if __name__ == '__main__':
     init_db()
     rag_engine.load_schemas()
     app.run(debug=True, port=5000)
-
