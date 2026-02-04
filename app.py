@@ -49,7 +49,7 @@ db = SQLAlchemy(app)
 
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gpt-oss:120b"
+MODEL_NAME = "gemini-3-pro-preview:latest"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -423,9 +423,9 @@ def chat():
         2. **Định danh đầy đủ:** Luôn sử dụng tên bảng dạng `dataset.table` (Full Qualified Name) và lấy đúng như tên bảng trong schema table trong [DATABASE SCHEMA], không được tự ý bịa ra hoặc giả định thêm.
         3. **Mapping Logic:**
 
-           - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [FUNCTION] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn..
+           - Nếu User yêu cầu truy vấn có điều kiện kèm theo, bạn PHẢI tham khảo thêm phần [FUNCTION] để hiểu rõ ý nghĩa các trường dữ liệu, không được tự suy diễn.
 
-           - Tìm trong code SQL của routine (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào.
+           - Tìm trong code SQL của routine [FUNCTION] (mệnh đề `CASE WHEN`) để xem trạng thái đó ứng với số ID nào (tên các routine có dạng func_get_..., ví dụ người dùng truy vấn có điều kiện về quốc gia thì phải lấy đúng các routine có country).
 
            - Ví dụ: Thấy `WHEN id=1 THEN 'Yes'` thì phải query `WHERE id = 1`.
 
