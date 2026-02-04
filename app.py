@@ -49,7 +49,7 @@ db = SQLAlchemy(app)
 
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-pro-preview:latest"
+MODEL_NAME = "gemini-3-flash-preview:latest"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 
@@ -486,3 +486,4 @@ if __name__ == '__main__':
     init_db()
     rag_engine.load_schemas()
     app.run(debug=True, port=5000)
+
