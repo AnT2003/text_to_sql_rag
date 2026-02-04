@@ -95,33 +95,22 @@ class RAGEngine:
 
     def tokenize(self, text):
         """
-        Tokenization nâng cao:
-        Giữ nguyên cụm từ snake_case VÀ tách rời chúng.
-        Ví dụ: "order_details" -> ["order_details", "order", "details"]
-        Để search chính xác cũng trúng mà search từ đơn cũng trúng.
+        Tokenizer đơn giản hóa để tăng khả năng bắt từ (Recall).
+        Giữ lại cả từ đơn và cụm từ.
         """
         text = str(text).lower()
-        # Tách thô bằng ký tự đặc biệt
-        raw_tokens = re.split(r'[\s\.\-\(\)\,]+', text)
+        # Thay thế ký tự đặc biệt bằng khoảng trắng
+        text = re.sub(r'[\_\-\.\,]', ' ', text)
         
-        final_tokens = []
-        stopwords = {
-            'string', 'int64', 'float', 'boolean', 'timestamp', 'date', 
-            'table', 'dataset', 'project', 'nullable', 'mode', 'type', 
-            'description', 'record', 'create', 'replace', 'partition', 'by',
-            'select', 'from', 'where'
-        }
-
-        for t in raw_tokens:
-            if not t or t in stopwords: continue
-            
-            final_tokens.append(t) # Giữ nguyên (vd: user_id)
-            
-            # Nếu có snake_case, tách thêm (vd: user, id)
-            if '_' in t:
-                sub_tokens = t.split('_')
-                final_tokens.extend([st for st in sub_tokens if len(st) > 1])
+        tokens = text.split()
         
+        # Stopwords tối thiểu thôi, đừng lọc 'table' hay 'date' vì đôi khi user hỏi đích danh
+        stopwords = {'select', 'from', 'where', 'and', 'or', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'of'}
+        
+        final_tokens = [t for t in tokens if t not in stopwords and len(t) > 1]
+        
+        # Thêm biến thể n-gram đơn giản (Optional but good for 'user id')
+        # Nhưng để BM25 hoạt động tốt nhất với Schema, ta giữ token đơn là chính.
         return final_tokens
 
     def load_schemas(self):
@@ -235,17 +224,19 @@ class RAGEngine:
 
     def query_expansion(self, user_query, api_key):
         """
-        Dùng AI để tìm từ khóa đồng nghĩa, tránh hallucination ngay từ bước này.
+        Dùng AI để dịch và mở rộng từ khóa.
+        QUAN TRỌNG: Phải dịch từ tiếng Việt sang tiếng Anh kỹ thuật (Database Terms).
         """
         try:
             client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
-            prompt = f"""Task: Extract database keywords from user query.
+            prompt = f"""You are a Database Expert.
 User Query: "{user_query}"
-Instructions:
-1. Identify potential table names (e.g., if user says 'users', output 'users').
-2. Identify potential column names (e.g., 'revenue', 'id').
-3. Return ONLY a list of English keywords separated by spaces.
-4. Do NOT invent specific table names if not sure."""
+
+Task: Convert this query into a list of Technical SQL Keywords (English).
+1. Translate Vietnamese terms to English (e.g., 'học viên' -> 'student user learner', 'đơn hàng' -> 'order transaction').
+2. Identify potential table names (snake_case) and columns.
+3. OUTPUT ONLY the list of keywords separated by spaces. Do NOT explain.
+"""
             
             response = client.chat(
                 model=MODEL_NAME,
@@ -253,69 +244,76 @@ Instructions:
                 options={"temperature": 0.0}
             )
             keywords = response['message']['content']
+            # Clean up: chỉ lấy chữ cái và số, bỏ ký tự lạ
+            keywords = re.sub(r'[^\w\s]', '', keywords)
             print(f"🔹 Expanded Query: {keywords}")
             return keywords
-        except:
+        except Exception as e:
+            print(f"Expansion Error: {e}")
             return user_query
 
-    def retrieve(self, query, expanded_query=None, top_k=10):
-        """
-        Hybrid Retrieval (BM25 + Rules):
-        1. Lấy Top 50 bằng BM25.
-        2. Chấm điểm lại (Re-ranking) dựa trên rules:
-           - Trùng tên bảng: +15 điểm.
-           - Là Table: +5 điểm.
-           - Là View: -2 điểm.
-        3. Lấy Top K.
-        """
+    def retrieve(self, query, expanded_query=None, top_k=20): # Tăng top_k lên 20
         if not self.is_ready: return ""
         
-        search_query = f"{query} {expanded_query}" if expanded_query else query
+        # Kết hợp: Query gốc (VN) + Expanded (EN)
+        search_query = f"{query} {expanded_query}"
         tokenized_query = self.tokenize(search_query)
         
         # 1. Raw Scores từ BM25
         doc_scores = self.bm25.get_scores(tokenized_query)
         
-        # 2. Lấy danh sách sơ bộ (Candidate generation)
+        # 2. Lấy Top 50 ứng viên
         top_n_candidates = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)[:50]
         
         final_scored_candidates = []
         query_lower = query.lower()
+        expanded_lower = str(expanded_query).lower()
         
         for idx in top_n_candidates:
+            # Cho phép điểm 0 nếu keyword match (đôi khi BM25 tính điểm gắt)
             original_score = doc_scores[idx]
-            if original_score <= 0: continue # Bỏ rác
             
             metadata = self.doc_map.get(idx, {})
             short_name = metadata.get('short_name', '')
             is_view = metadata.get('is_view', False)
             obj_type = metadata.get('type')
             
-            # 3. Custom Scoring (Re-ranking)
             boost = 0.0
             
-            # Rule A: Name Match (Quan trọng nhất)
-            # Nếu tên bảng (vd: 'users') xuất hiện chính xác trong query -> Boost mạnh
-            if short_name and re.search(r'\b' + re.escape(short_name) + r'\b', query_lower):
-                boost += 15.0 
+            # Rule A: Name Match (Check cả trong query gốc lẫn expanded query)
+            # Ví dụ: Expanded ra 'booking' -> Match bảng 'bookings'
+            if short_name:
+                # Check trong query tiếng Việt
+                if short_name in query_lower: 
+                    boost += 20.0
+                # Check trong query tiếng Anh (expanded)
+                elif short_name in expanded_lower:
+                    boost += 15.0
             
-            # Rule B: Object Type Priority
+            # Rule B: Ưu tiên Table
             if obj_type == 'table' and not is_view:
-                boost += 5.0  # Ưu tiên Table gốc
+                boost += 5.0 
             elif is_view:
-                boost -= 2.0  # Giảm điểm View để Table gốc nổi lên
+                boost -= 1.0 # Giảm nhẹ thôi
                 
             final_score = original_score + boost
-            final_scored_candidates.append((idx, final_score))
             
-        # 4. Sort theo Final Score và lấy Top K
+            # Chỉ lấy nếu có điểm > 0 hoặc boost > 0
+            if final_score > 0:
+                final_scored_candidates.append((idx, final_score))
+            
+        # 3. Sort và lấy Top K
         final_scored_candidates.sort(key=lambda x: x[1], reverse=True)
         
         results = [self.schema_docs[idx] for idx, score in final_scored_candidates[:top_k]]
         
         if not results:
-            print("⚠️ Không tìm thấy schema khớp, lấy default top 2.")
-            return "\n".join(self.schema_docs[:2])
+            print("⚠️ Không tìm thấy schema, thử lấy top 5 mặc định.")
+            return "\n".join(self.schema_docs[:5])
+
+        # [DEBUG] In ra tên các bảng tìm được để kiểm tra
+        print(f"✅ RAG Retrieved {len(results)} tables.") 
+        # (Bạn có thể bỏ dòng print này khi chạy prod)
             
         return "\n--------------------\n".join(results)
 
@@ -445,8 +443,5 @@ User Question: {user_msg} """
     except Exception as e:
         print(f"Chat Error: {e}")
         return jsonify({"error": str(e)}), 500
-if __name__ == '__main__': # Init DB & RAG khi chạy local init_db() rag_engine.load_schemas() 
+if __name__ == 'main': # Init DB & RAG khi chạy local init_db() rag_engine.load_schemas() 
     app.run(debug=True, port=5000)
-
-
-
