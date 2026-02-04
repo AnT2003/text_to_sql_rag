@@ -235,7 +235,7 @@ class RAGEngine:
         except:
             return user_query # Fallback nếu lỗi
 
-    def retrieve(self, query, expanded_query=None, top_k=10):
+    def retrieve(self, query, expanded_query=None, top_k=20):
         if not self.is_ready: return ""
         
         # Kết hợp query gốc và query mở rộng để tìm kiếm toàn diện
@@ -324,7 +324,7 @@ def chat():
         
         # BƯỚC 2: BM25 RETRIEVAL (Tìm kiếm chính xác cao)
         # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
-        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
+        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=20)
 
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
         system_prompt = f"""Role: Senior BigQuery SQL Architect.
@@ -409,3 +409,4 @@ if __name__ == '__main__':
     init_db()
     rag_engine.load_schemas()
     app.run(debug=True, port=5000)
+
