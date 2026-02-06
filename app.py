@@ -40,12 +40,7 @@ SCHEMA_FOLDER = "./schemas"
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
 def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
-    """
-    OpenRouter embedding (production safe)
-    - chống crash khi OpenRouter trả HTML / text
-    - log lỗi rõ ràng khi deploy Render
-    """
-
+    import numpy as np
     if isinstance(texts, str):
         texts = [texts]
 
@@ -53,41 +48,33 @@ def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
         raise ValueError("❌ Missing OPENROUTER_API_KEY")
 
     url = "https://openrouter.ai/api/v1/embeddings"
-
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
         "HTTP-Referer": "http://localhost:3000",
         "X-Title": "Text2SQL RAG"
     }
-
     payload = {
         "model": model,
         "input": texts,
         "encoding_format": "float"
     }
 
-    res = requests.post(url, headers=headers, json=payload)
-
-    # 🔴 Nếu OpenRouter trả lỗi → in FULL body để debug Render
-    if res.status_code != 200:
-        raise ValueError(f"❌ OpenRouter HTTP {res.status_code}: {res.text}")
-
-    # 🔴 BẮT lỗi HTML / text response (nguyên nhân crash của bạn)
     try:
-        result = res.json()
-    except Exception:
-        raise ValueError(f"❌ OpenRouter returned NON-JSON response:\n{res.text}")
-
-    # 🔴 BẮT lỗi provider fail (rất hay gặp)
-    if "error" in result:
-        raise ValueError(f"❌ OpenRouter provider error: {result}")
-
-    if "data" not in result:
-        raise ValueError(f"❌ Invalid embedding response: {result}")
-
-    embeddings = [item["embedding"] for item in result["data"]]
-    return np.array(embeddings, dtype="float32")
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        res.raise_for_status()
+        text = res.text.strip()  # remove leading/trailing whitespace
+        data = json.loads(text)
+        if "data" not in data:
+            print("⚠️ OpenRouter response missing 'data', returning zero vector")
+            return np.zeros((len(texts), 4096), dtype="float32")  # fallback
+        return np.array([item["embedding"] for item in data["data"]], dtype="float32")
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON decode error: {e}, response:\n{text}")
+        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
+    except Exception as e:
+        print(f"⚠️ OpenRouter embedding error: {e}, returning zero vector")
+        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
