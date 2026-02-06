@@ -40,7 +40,7 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l6-v2"):
+def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
     """
     Trả về numpy array embeddings từ OpenRouter API
     """
@@ -200,7 +200,7 @@ teacher tutor student booking invoice complaint payment order lesson class
                         short_name = item['routine_name']
                         definition = item.get('routine_definition', '')
                         arguments = item.get('arguments', '')
-                        full_name = f"`{project}.kynaforkids.{short_name}`"
+                        full_name = f"`kynaforkids-server-production.kynaforkids.{short_name}`"
                         doc = f"""
 [FUNCTION] `{full_name}`
 
