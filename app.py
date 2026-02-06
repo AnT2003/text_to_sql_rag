@@ -10,7 +10,9 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
 from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
-
+import faiss
+from sentence_transformers import SentenceTransformer
+import numpy as np
 # =========================================================
 #  PHẦN 1: CONFIG & SETUP
 # =========================================================
@@ -85,206 +87,191 @@ def get_chat_history_formatted(session_id, limit=10):
 #  PHẦN 3: ADVANCED RAG ENGINE (CORE LOGIC)
 # =========================================================
 
+# =========================================================
+#  NEW HYBRID RAG ENGINE (BM25 + EMBEDDING + BOOST)
+# =========================================================
+
 class RAGEngine:
     def __init__(self):
-        self.schema_docs = [] # Lưu nội dung text full
-        self.bm25 = None      # Object tìm kiếm BM25
-        self.doc_map = {}     # Map index -> doc data
+        self.schema_docs = []
+        self.doc_types = []          # table / function
+        self.tokenized_corpus = []
+        self.bm25 = None
+        
+        # 🔥 NEW: semantic search
+        print("🔹 Loading embedding model BGE-M3...")
+        self.embed_model = SentenceTransformer("BAAI/bge-m3")
+        self.embeddings = None
+        self.index = None
+        
         self.is_ready = False
 
+    # =====================================================
+    # TOKENIZER (GIỮ NGUYÊN snake_case !!!)
+    # =====================================================
     def tokenize(self, text):
-        """
-        Kỹ thuật Tokenization chuyên cho SQL:
-        - Tách snake_case (user_id -> user, id)
-        - Tách camelCase
-        - Loại bỏ từ thừa (stopwords)
-        """
-        # Chuyển các ký tự đặc biệt thành dấu cách
-        text = re.sub(r'[\.\_\-\(\)\,]', ' ', str(text))
-        # Tách camelCase (e.g., camelCase -> camel Case)
+        text = str(text)
+        text = re.sub(r'[.\-\(\),`]', ' ', text)  # KHÔNG xóa _
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
         tokens = text.lower().split()
-        
-        # Stopwords SQL thông dụng không mang ý nghĩa định danh
+
         stopwords = {
-            'string', 'int64', 'float', 'boolean', 'timestamp', 'date', 
-            'table', 'dataset', 'project', 'nullable', 'mode', 'type', 
-            'description', 'record', 'create', 'replace'
+            'string','int64','float','boolean','timestamp','date',
+            'table','dataset','project','nullable','mode','type',
+            'description','record','create','replace','function'
         }
         return [t for t in tokens if t not in stopwords and len(t) > 1]
 
+    # =====================================================
+    # LOAD SCHEMA + BUILD HYBRID INDEX
+    # =====================================================
     def load_schemas(self):
-        print("🚀 Đang khởi tạo Advanced RAG Indexing...")
-        new_docs = []
-        tokenized_corpus = []
-        
-        if not os.path.exists(SCHEMA_FOLDER):
-            print("⚠️ Không tìm thấy folder schemas")
-            return
+        print("🚀 Building Hybrid RAG Index...")
+        docs = []
+        tokenized = []
+        doc_types = []
 
         json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
-        
 
         for file_path in json_files:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    items = data if isinstance(data, list) else [data]
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                items = data if isinstance(data, list) else [data]
 
-                    for item in items:
-                        # ===============================
-                        # Build Document Content
-                        # ===============================
-                        doc_content = ""
-                        keywords_source = ""
-                        if 'table_name' in item:
-                            table_name = item.get("table_name", "")
-                            ddl = item.get("ddl", "")
+                for item in items:
 
-                            dataset_id = item.get('table_schema')
-                            project_id = 'kynaforkids-server-production'
+                    # ================= TABLE =================
+                    if 'table_name' in item:
+                        dataset = item.get('table_schema')
+                        project = "kynaforkids-server-production"
+                        full_table = f"`{project}.{dataset}.{item['table_name']}`"
 
-                            # Prefix đầy đủ: `project.dataset` hoặc `dataset`
-                            full_prefix = f"{project_id}.{dataset_id}" if project_id else dataset_id
-                            
-                            table_name = item['table_name']
-                            full_table_name = f"`{full_prefix}.{table_name}`"
+                        cols = []
+                        raw_cols = item.get("columns", "[]")
+                        parsed_cols = json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols
+                        if isinstance(parsed_cols, list):
+                            cols = parsed_cols
 
-                            # -------------------------------
-                            # Parse columns (JSON string)
-                            # -------------------------------
-                            cols_desc = []
-                            col_tokens = []
+                        doc = f"""
+[TABLE] {full_table}
+Columns: {', '.join(cols)}
 
-                            raw_cols = item.get("columns", "[]")
-                            try:
-                                parsed_cols = json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols
-                                if isinstance(parsed_cols, list):
-                                    for col in parsed_cols:
-                                        cols_desc.append(f"- {col}")
-                                        col_tokens.append(col)
-                            except Exception:
-                                pass
+Business keywords:
+teacher tutor student booking invoice complaint payment order lesson class
+"""
+                        keywords = f"{full_table} {' '.join(cols)}"
 
-                            # -------------------------------
-                            # Build doc_content
-                            # -------------------------------
-                            doc_content = (
-                                f"[TABLE] {full_table_name}\n"
-                                f"Type: {item.get('table_type', '')}\n"
-                                f"Columns:\n" + "\n".join(cols_desc)
-                            )
+                        docs.append(doc)
+                        tokenized.append(self.tokenize(keywords))
+                        doc_types.append("table")
 
-                            # -------------------------------
-                            # Build keywords source (for index)
-                            # -------------------------------
-                            keywords_source = f"{full_table_name} " + " ".join(col_tokens)
+                    # ================= FUNCTION =================
+                    elif 'routine_name' in item:
+                        short_name = item['routine_name']
+                        ddl = item.get('ddl', '')
+                        definition = item.get('routine_definition', '')
+                        arguments = item.get('arguments', '')
 
-                        elif 'routine_name' in item:
-                            short_name = item.get('routine_name')
-                            ddl = item.get('ddl', '')
-                            definition = item.get('routine_definition', '')
-                            arguments = item.get('arguments', '')
-                        
-                            # Lấy full function name từ DDL
-                            match = re.search(r'FUNCTION\s+`([^`]+)`', ddl, re.IGNORECASE)
-                            full_name = f"`{match.group(1)}`" if match else f"`{short_name}`"
-                        
-                            # ===============================
-                            # 🚀 ENRICH SEMANTIC KEYWORDS
-                            # ===============================
-                            semantic_keywords = """
-                            function udf business logic mapping helper transformation
-                            country nationality nation region location geo
-                            teacher tutor instructor user profile account
-                            vietnam vn vietnamese
-                            filter segmentation classification mapping
-                            """
-                        
-                            # Document hiển thị cho LLM (để nó hiểu logic function)
-                            doc_content = f"""
-                        [FUNCTION] {full_name}
-                        Arguments: {arguments}
-                        
-                        Business purpose:
-                        - Helper function for business logic
-                        - Often used for filtering, mapping and segmentation
-                        
-                        SQL Logic:
-                        {definition}
-                        """
-                        
-                            # Keywords để BM25 search (CỰC KỲ QUAN TRỌNG)
-                            keywords_source = f"""
-                            {full_name}
-                            {short_name}
-                            {arguments}
-                            {definition}
-                            {semantic_keywords}
-                            """
+                        match = re.search(r'FUNCTION\s+`([^`]+)`', ddl, re.IGNORECASE)
+                        full_name = match.group(1) if match else short_name
 
-                        if doc_content:
-                            new_docs.append(doc_content)
-                            tokenized_corpus.append(self.tokenize(keywords_source))
+                        doc = f"""
+[FUNCTION] `{full_name}`
 
-            except Exception as e:
-                print(f"Error loading {file_path}: {e}")
+Arguments: {arguments}
 
-        # KHỞI TẠO BM25 INDEX
-        if tokenized_corpus:
-            self.bm25 = BM25Okapi(tokenized_corpus)
-            self.schema_docs = new_docs
-            self.is_ready = True
-            print(f"✅ Đã index {len(new_docs)} schemas với BM25.")
-        else:
-            print("⚠️ Không có dữ liệu để index.")
+SQL Logic:
+{definition}
 
-    def query_expansion(self, user_query, api_key):
-        """
-        Kỹ thuật 'Query Expansion': Dùng AI nhỏ để dịch câu hỏi người dùng
-        sang các từ khóa Database tiềm năng trước khi search.
-        Ví dụ: "Tổng tiền bán hàng" -> "revenue sales total amount transaction"
-        """
+Business purpose:
+helper business logic mapping classification segmentation
+teacher_type country nationality region geo filter mapping
+"""
+                        keywords = f"{full_name} {short_name} {definition}"
+
+                        docs.append(doc)
+                        tokenized.append(self.tokenize(keywords))
+                        doc_types.append("function")
+
+        # ===== BM25 =====
+        self.bm25 = BM25Okapi(tokenized)
+
+        # ===== EMBEDDINGS =====
+        print("🔹 Creating embeddings...")
+        embeddings = self.embed_model.encode(docs, normalize_embeddings=True)
+        self.embeddings = np.array(embeddings).astype("float32")
+
+        # ===== FAISS INDEX =====
+        dim = self.embeddings.shape[1]
+        self.index = faiss.IndexFlatIP(dim)
+        self.index.add(self.embeddings)
+
+        self.schema_docs = docs
+        self.doc_types = doc_types
+        self.tokenized_corpus = tokenized
+        self.is_ready = True
+
+        print(f"✅ Indexed {len(docs)} schema objects")
+
+    # =====================================================
+    # QUERY EXPANSION (LLM)
+    # =====================================================
+    def query_expansion(self, query, api_key):
         try:
             client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
-            prompt = f"""You are a SQL search assistant. 
-            User Query: "{user_query}"
-            Task: List 5-10 technical database keywords (in English) related to this query.
-            Focus on synonyms for table names or column names (e.g., if user says "client", output "customer user account profile").
-            Output only the keywords separated by spaces. No explanation."""
-            
-            response = client.chat(
-                model=MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                options={"temperature": 0.0}
-            )
-            keywords = response['message']['content']
-            print(f"🔹 Expanded Query: {keywords}")
-            return keywords
-        except:
-            return user_query # Fallback nếu lỗi
+            prompt = f"""
+Convert the user question into database search keywords.
+Include:
+- tables
+- columns
+- functions
+- synonyms
 
-    def retrieve(self, query, expanded_query=None, top_k=20):
-        if not self.is_ready: return ""
-        
-        # Kết hợp query gốc và query mở rộng để tìm kiếm toàn diện
-        search_query = f"{query} {expanded_query}" if expanded_query else query
-        tokenized_query = self.tokenize(search_query)
-        
-        # BM25 Scoring
-        doc_scores = self.bm25.get_scores(tokenized_query)
-        
-        # Lấy top K indices
-        top_n = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)[:top_k]
-        
-        # Filter: Chỉ lấy những doc có score > 0 (tránh lấy rác nếu không khớp gì)
-        results = [self.schema_docs[i] for i in top_n if doc_scores[i] > 0]
-        
-        if not results:
-            print("⚠️ Không tìm thấy schema khớp, lấy default top 2.")
-            return "\n".join(self.schema_docs[:2])
-            
-        return "\n--------------------\n".join(results)
+User: {query}
+Return keywords only.
+"""
+            res = client.chat(
+                model=MODEL_NAME,
+                messages=[{"role":"user","content":prompt}],
+                options={"temperature":0}
+            )
+            return res['message']['content']
+        except:
+            return query
+
+    # =====================================================
+    # HYBRID RETRIEVAL (CORE)
+    # =====================================================
+    def retrieve(self, query, expanded_query, top_k=20):
+        if not self.is_ready:
+            return ""
+
+        full_query = f"{query} {expanded_query}"
+
+        # ---------- BM25 ----------
+        bm25_scores = self.bm25.get_scores(self.tokenize(full_query))
+        bm25_scores = np.array(bm25_scores)
+
+        # ---------- VECTOR SEARCH ----------
+        q_embed = self.embed_model.encode([full_query], normalize_embeddings=True)
+        D, I = self.index.search(np.array(q_embed).astype("float32"), len(self.schema_docs))
+        vector_scores = np.zeros(len(self.schema_docs))
+        vector_scores[I[0]] = D[0]
+
+        # ---------- HYBRID SCORE ----------
+        hybrid = 0.5 * bm25_scores + 0.5 * vector_scores
+
+        # ---------- FUNCTION BOOST ----------
+        if "func_" in full_query.lower():
+            for i, t in enumerate(self.doc_types):
+                if t == "function":
+                    hybrid[i] *= 1.5
+
+        # ---------- TOP K ----------
+        top_idx = np.argsort(hybrid)[::-1][:top_k]
+        results = [self.schema_docs[i] for i in top_idx if hybrid[i] > 0]
+
+        return "\n----------------------\n".join(results)
 
 # Khởi tạo RAG Engine
 rag_engine = RAGEngine()
