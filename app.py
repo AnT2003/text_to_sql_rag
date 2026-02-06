@@ -39,27 +39,42 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l12-v2"):
-    """
-    Trả về numpy array embeddings từ OpenRouter API
-    """
+def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
+    import numpy as np
+    if isinstance(texts, str):
+        texts = [texts]
+
+    if not OPENROUTER_API_KEY:
+        raise ValueError("❌ Missing OPENROUTER_API_KEY")
+
     url = "https://openrouter.ai/api/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",  # optional
-        "X-Title": "Data Analysis Project"        # optional
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "Text2SQL RAG"
     }
     payload = {
         "model": model,
-        "input": texts
+        "input": texts,
+        "encoding_format": "float"
     }
-    res = requests.post(url, headers=headers, json=payload)
-    if res.status_code != 200:
-        raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
-    response_data = res.json()
-    embeddings = [item["embedding"] for item in response_data["data"]]
-    return np.array(embeddings, dtype="float32")
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        res.raise_for_status()
+        text = res.text.strip()  # remove leading/trailing whitespace
+        data = json.loads(text)
+        if "data" not in data:
+            print("⚠️ OpenRouter response missing 'data', returning zero vector")
+            return np.zeros((len(texts), 4096), dtype="float32")  # fallback
+        return np.array([item["embedding"] for item in data["data"]], dtype="float32")
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON decode error: {e}, response:\n{text}")
+        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
+    except Exception as e:
+        print(f"⚠️ OpenRouter embedding error: {e}, returning zero vector")
+        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
@@ -192,7 +207,6 @@ Business purpose:
 helper business logic mapping classification segmentation
 teacher_type country nationality region geo filter mapping
 """
-                        keywords = f"{full_name} {short_name} {definition}"
 
                         docs.append(doc)
                         doc_types.append("function")
@@ -238,7 +252,12 @@ Return keywords only.
             return query
 
     # =====================================================
-    def retrieve(self, query, expanded_query, top_k=20):
+    def retrieve(self, query, expanded_query, top_k=20, min_score=0.2):
+        """
+        Trả về top_k schema documents dựa trên embedding cosine similarity.
+        expanded_query: từ bước query expansion
+        min_score: ngưỡng similarity để lọc các doc quá yếu
+        """
         if not self.is_ready:
             return ""
 
@@ -248,20 +267,30 @@ Return keywords only.
         q_embed = hf_embed([full_query])[0]
 
         # normalize query vector
-        q_embed = q_embed / np.linalg.norm(q_embed)
+        q_norm = np.linalg.norm(q_embed)
+        if q_norm > 0:
+            q_embed = q_embed / q_norm
+
+        # normalize document embeddings
+        doc_norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+        doc_norms[doc_norms == 0] = 1  # tránh chia cho 0
+        embeddings_norm = self.embeddings / doc_norms
 
         # ===== COSINE SIMILARITY =====
-        scores = np.dot(self.embeddings, q_embed)
+        scores = np.dot(embeddings_norm, q_embed)
 
-        # ===== FUNCTION BOOST (giữ lại logic cũ) =====
+        # ===== FUNCTION BOOST (giữ logic cũ) =====
         if "func_" in full_query.lower():
             for i, t in enumerate(self.doc_types):
                 if t == "function":
                     scores[i] *= 1.3
 
+        # ===== LỌC theo ngưỡng =====
+        filtered_idx = np.where(scores >= min_score)[0]
+
         # ===== TOP K =====
-        top_idx = np.argsort(scores)[::-1][:top_k]
-        results = [self.schema_docs[i] for i in top_idx if scores[i] > 0.15]
+        top_idx = filtered_idx[np.argsort(scores[filtered_idx])[::-1][:top_k]]
+        results = [self.schema_docs[i] for i in top_idx]
 
         return "\n----------------------\n".join(results)
 
@@ -330,9 +359,8 @@ def chat():
         # Nếu câu hỏi quá ngắn, AI sẽ giúp đoán các bảng liên quan
         expanded_keywords = rag_engine.query_expansion(user_msg, api_key)
         
-        # BƯỚC 2: BM25 RETRIEVAL (Tìm kiếm chính xác cao)
         # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
-        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=20)
+        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
 
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
         system_prompt = f"""Role: Senior BigQuery SQL Architect.
@@ -414,5 +442,3 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-
