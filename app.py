@@ -35,7 +35,32 @@ OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
-HF_TOKEN = os.getenv("HF_TOKEN")
+# =========================================================
+#  PHẦN 1B: OpenRouter Embedding (thay HF cũ)
+# =========================================================
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or "sk-or-yourkeyhere"
+
+def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l6-v2"):
+    """
+    Trả về numpy array embeddings từ OpenRouter API
+    """
+    url = "https://openrouter.ai/api/v1/embeddings"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:3000",  # optional
+        "X-Title": "Data Analysis Project"        # optional
+    }
+    payload = {
+        "model": model,
+        "input": texts
+    }
+    res = requests.post(url, headers=headers, json=payload)
+    if res.status_code != 200:
+        raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
+    response_data = res.json()
+    embeddings = [item["embedding"] for item in response_data["data"]]
+    return np.array(embeddings, dtype="float32")
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
@@ -91,19 +116,8 @@ def get_chat_history_formatted(session_id, limit=10):
 # HuggingFace Embedding API (NO LOCAL MODEL)
 # =========================================================
 def hf_embed(texts):
-    url = "https://api-inference.huggingface.co/pipeline/feature-extraction/BAAI/bge-m3"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-
-    response = requests.post(url, headers=headers, json={"inputs": texts})
-    result = response.json()
-
-    # ✅ Trích embedding từ dict nếu API trả về dict
-    if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and 'embedding' in result[0]:
-        embeddings_list = [item['embedding'] for item in result]
-        return np.array(embeddings_list, dtype="float32")
-    else:
-        # fallback nếu trả thẳng list of list
-        return np.array(result, dtype="float32")
+    # Chuyển sang OpenRouter
+    return openrouter_embedding(texts)
 
 # =========================================================
 #  NEW HYBRID RAG ENGINE (BM25 + EMBEDDING + BOOST)
@@ -435,4 +449,3 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
