@@ -198,13 +198,9 @@ teacher tutor student booking invoice complaint payment order lesson class
                     # ================= FUNCTION =================
                     elif 'routine_name' in item:
                         short_name = item['routine_name']
-                        ddl = item.get('ddl', '')
                         definition = item.get('routine_definition', '')
                         arguments = item.get('arguments', '')
-
-                        match = re.search(r'FUNCTION\s+`([^`]+)`', ddl, re.IGNORECASE)
-                        full_name = match.group(1) if match else short_name
-
+                        full_name = f"`{project}.kynaforkids.{short_name}`"
                         doc = f"""
 [FUNCTION] `{full_name}`
 
