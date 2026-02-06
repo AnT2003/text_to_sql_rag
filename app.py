@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "deepseek-v3.1:latest"
+MODEL_NAME = "gemini-3-flash-preview"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 # =========================================================
@@ -442,5 +442,6 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
