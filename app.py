@@ -40,7 +40,7 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
+def openrouter_embedding(texts, model="sentence-transformers/paraphrase-minilm-l6-v2"):
     """
     Trả về numpy array embeddings từ OpenRouter API
     """
@@ -443,5 +443,6 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
 
 
