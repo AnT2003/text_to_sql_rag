@@ -59,9 +59,20 @@ def openrouter_embedding(texts, model="google/gemini-embedding-001"):
     if res.status_code != 200:
         raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
     response_data = res.json()
-    embeddings = np.array([item["embedding"] for item in response_data["data"]], dtype="float32")
 
-# ⭐ normalize để dùng cosine similarity
+    # ===== FIX: hỗ trợ cả OpenAI format và Gemini format =====
+    if "data" in response_data:  # OpenAI-style models
+        raw_embeddings = [item["embedding"] for item in response_data["data"]]
+
+    elif "embeddings" in response_data:  # Gemini embedding
+        raw_embeddings = [item["embedding"] for item in response_data["embeddings"]]
+
+    else:
+        raise ValueError(f"Unknown OpenRouter response format: {response_data}")
+
+    embeddings = np.array(raw_embeddings, dtype="float32")
+
+    # ===== normalize để dùng cosine similarity =====
     norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
     embeddings = embeddings / np.clip(norms, 1e-12, None)
 
