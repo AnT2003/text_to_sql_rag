@@ -11,7 +11,6 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
 from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
 import requests
-from sentence_transformers import SentenceTransformer
 import numpy as np
 # =========================================================
 #  PHẦN 1: CONFIG & SETUP
@@ -430,3 +429,4 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
