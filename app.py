@@ -11,6 +11,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
 from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
 import requests
+from sentence_transformers import SentenceTransformer
 import numpy as np
 # =========================================================
 #  PHẦN 1: CONFIG & SETUP
@@ -97,7 +98,13 @@ def hf_embed(texts):
     response = requests.post(url, headers=headers, json={"inputs": texts})
     result = response.json()
 
-    return np.array(result).astype("float32")
+    # ✅ Trích embedding từ dict nếu API trả về dict
+    if isinstance(result, list) and len(result) > 0 and isinstance(result[0], dict) and 'embedding' in result[0]:
+        embeddings_list = [item['embedding'] for item in result]
+        return np.array(embeddings_list, dtype="float32")
+    else:
+        # fallback nếu trả thẳng list of list
+        return np.array(result, dtype="float32")
 
 # =========================================================
 #  NEW HYBRID RAG ENGINE (BM25 + EMBEDDING + BOOST)
@@ -429,4 +436,3 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
