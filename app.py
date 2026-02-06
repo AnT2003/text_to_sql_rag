@@ -59,8 +59,14 @@ def openrouter_embedding(texts, model="google/gemini-embedding-001"):
     if res.status_code != 200:
         raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
     response_data = res.json()
-    embeddings = [item["embedding"] for item in response_data["data"]]
-    return np.array(embeddings, dtype="float32")
+    embeddings = np.array([item["embedding"] for item in response_data["data"]], dtype="float32")
+
+# ⭐ normalize để dùng cosine similarity
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / np.clip(norms, 1e-12, None)
+
+    return embeddings
+
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
@@ -276,6 +282,9 @@ Return keywords only.
         # ---------- VECTOR SEARCH (NO FAISS) ----------
         q_embed = hf_embed([full_query])[0]
 
+        # ⭐ normalize query vector
+        q_embed = q_embed / np.clip(np.linalg.norm(q_embed), 1e-12, None)
+
         vector_scores = np.dot(self.embeddings, q_embed)
 
         # ---------- HYBRID SCORE ----------
@@ -442,4 +451,3 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
