@@ -13,9 +13,9 @@ psycopg2-binary
 # ===== Ollama Client =====
 ollama
 # ===== RAG - Score ====== 
-rank-bm25
 faiss-cpu==1.7.4
 sentence-transformers==3.2.1
 rank-bm25==0.2.2
 numpy
+
 
