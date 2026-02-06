@@ -38,7 +38,7 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 #  PHẦN 1B: OpenRouter Embedding (thay HF cũ)
 # =========================================================
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or "sk-or-yourkeyhere"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
 def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l6-v2"):
     """
@@ -394,9 +394,7 @@ Step 4 → Only then generate SQL.
 
 4. ROUTINE / FUNCTION LOGIC (CRITICAL)
 If a FUNCTION/Routine appears in CONTEXT:
-- Treat its SQL as the OFFICIAL business logic.
-- Extract mappings from CASE WHEN / conditions.
-- Convert business words → numeric/status codes using that logic.
+- Use the routine via `function(args)` syntax in SQL (do NOT extract full CASE WHEN code outside).
 - Routine can be used in SELECT or WHERE only.
 - NEVER place routine inside FROM.
 
@@ -411,7 +409,7 @@ If a FUNCTION/Routine appears in CONTEXT:
 6. OUTPUT FORMAT
 - Return ONLY one SQL query inside a ```sql``` block.
 - No markdown, no commentary outside the block.
-- Short explanation AFTER the SQL is optional.
+- After the SQL, provide a short explanation of the query and how routines are applied.
 
 =================================================
 
