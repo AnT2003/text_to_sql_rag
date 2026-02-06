@@ -14,9 +14,9 @@ psycopg2-binary
 ollama
 # ===== RAG - Score ====== 
 requests
-gunicorn
 rank-bm25
 numpy
+
 
 
 
