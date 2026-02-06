@@ -39,26 +39,46 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l6-v2"):
+def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
     """
-    Trả về numpy array embeddings từ OpenRouter API
+    OpenRouter embedding chuẩn (batch support + format đúng spec mới)
+    Trả về numpy array shape (n_texts, dim)
     """
+
+    if isinstance(texts, str):
+        texts = [texts]
+
     url = "https://openrouter.ai/api/v1/embeddings"
+
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",  # optional
-        "X-Title": "Data Analysis Project"        # optional
+        "HTTP-Referer": "http://localhost:3000",
+        "X-Title": "Text2SQL RAG"
     }
+
     payload = {
         "model": model,
-        "input": texts
+        "input": texts,
+        "encoding_format": "float"
     }
+
     res = requests.post(url, headers=headers, json=payload)
+
     if res.status_code != 200:
         raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
-    response_data = res.json()
-    embeddings = [item["embedding"] for item in response_data["data"]]
+
+    result = res.json()
+
+    # 🔥 format chuẩn OpenRouter:
+    # {
+    #   "data":[ {"embedding":[...]} ]
+    # }
+
+    if "data" not in result:
+        raise ValueError(f"Invalid embedding response: {result}")
+
+    embeddings = [item["embedding"] for item in result["data"]]
     return np.array(embeddings, dtype="float32")
 
 # =========================================================
