@@ -39,42 +39,27 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
-    import numpy as np
-    if isinstance(texts, str):
-        texts = [texts]
-
-    if not OPENROUTER_API_KEY:
-        raise ValueError("❌ Missing OPENROUTER_API_KEY")
-
+def openrouter_embedding(texts, model="intfloat/multilingual-e5-large):
+    """
+    Trả về numpy array embeddings từ OpenRouter API
+    """
     url = "https://openrouter.ai/api/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "Text2SQL RAG"
+        "HTTP-Referer": "http://localhost:3000",  # optional
+        "X-Title": "Data Analysis Project"        # optional
     }
     payload = {
         "model": model,
-        "input": texts,
-        "encoding_format": "float"
+        "input": texts
     }
-
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        res.raise_for_status()
-        text = res.text.strip()  # remove leading/trailing whitespace
-        data = json.loads(text)
-        if "data" not in data:
-            print("⚠️ OpenRouter response missing 'data', returning zero vector")
-            return np.zeros((len(texts), 4096), dtype="float32")  # fallback
-        return np.array([item["embedding"] for item in data["data"]], dtype="float32")
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON decode error: {e}, response:\n{text}")
-        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
-    except Exception as e:
-        print(f"⚠️ OpenRouter embedding error: {e}, returning zero vector")
-        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
+    res = requests.post(url, headers=headers, json=payload)
+    if res.status_code != 200:
+        raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
+    response_data = res.json()
+    embeddings = [item["embedding"] for item in response_data["data"]]
+    return np.array(embeddings, dtype="float32")
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
