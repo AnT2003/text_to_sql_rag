@@ -40,7 +40,7 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="sentence-transformers/paraphrase-minilm-l6-v2"):
+def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l6-v2"):
     """
     Trả về numpy array embeddings từ OpenRouter API
     """
@@ -389,9 +389,8 @@ Step 3 → Verify joins only via columns that exist in schemas.
 Step 4 → Only then generate SQL.
 
 4. ROUTINE / FUNCTION LOGIC (CRITICAL)
-If a FUNCTION/Routine appears in CONTEXT:
-- Use the routine via `function(args)` syntax in SQL (do NOT extract full CASE WHEN code outside).
-- Routine can be used in SELECT or WHERE only.
+- For SELECT columns: use routines via `function(args)` syntax (do NOT extract full CASE WHEN code outside).
+- For WHERE / conditions: still refer to the routine definitions to get exact example values (e.g., id=5, status=4) rather than just using `function(args)`.
 - NEVER place routine inside FROM.
 
 5. BIGQUERY BEST PRACTICES (MANDATORY)
@@ -443,4 +442,3 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
