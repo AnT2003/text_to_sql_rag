@@ -9,7 +9,6 @@ from ollama import Client
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
-from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
 import requests
 import numpy as np
 # =========================================================
@@ -40,7 +39,7 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="google/gemini-embedding-001"):
+def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l6-v2"):
     """
     Trả về numpy array embeddings từ OpenRouter API
     """
@@ -59,25 +58,8 @@ def openrouter_embedding(texts, model="google/gemini-embedding-001"):
     if res.status_code != 200:
         raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
     response_data = res.json()
-
-    # ===== FIX: hỗ trợ cả OpenAI format và Gemini format =====
-    if "data" in response_data:  # OpenAI-style models
-        raw_embeddings = [item["embedding"] for item in response_data["data"]]
-
-    elif "embeddings" in response_data:  # Gemini embedding
-        raw_embeddings = [item["embedding"] for item in response_data["embeddings"]]
-
-    else:
-        raise ValueError(f"Unknown OpenRouter response format: {response_data}")
-
-    embeddings = np.array(raw_embeddings, dtype="float32")
-
-    # ===== normalize để dùng cosine similarity =====
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    embeddings = embeddings / np.clip(norms, 1e-12, None)
-
-    return embeddings
-
+    embeddings = [item["embedding"] for item in response_data["data"]]
+    return np.array(embeddings, dtype="float32")
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
@@ -145,37 +127,18 @@ class RAGEngine:
         self.schema_docs = []
         self.doc_types = []          # table / function
         self.tokenized_corpus = []
-        self.bm25 = None
         
         # 🔥 NEW: semantic search
         print("🔹 Using HuggingFace Embedding API (serverless)")
         self.embeddings = None
         
         self.is_ready = False
-
-    # =====================================================
-    # TOKENIZER (GIỮ NGUYÊN snake_case !!!)
-    # =====================================================
-    def tokenize(self, text):
-        text = str(text)
-        text = re.sub(r'[.\-\(\),`]', ' ', text)  # KHÔNG xóa _
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-        tokens = text.lower().split()
-
-        stopwords = {
-            'string','int64','float','boolean','timestamp','date',
-            'table','dataset','project','nullable','mode','type',
-            'description','record','create','replace','function'
-        }
-        return [t for t in tokens if t not in stopwords and len(t) > 1]
-
     # =====================================================
     # LOAD SCHEMA + BUILD HYBRID INDEX
     # =====================================================
     def load_schemas(self):
         print("🚀 Building Hybrid RAG Index...")
         docs = []
-        tokenized = []
         doc_types = []
 
         json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
@@ -209,7 +172,6 @@ teacher tutor student booking invoice complaint payment order lesson class
                         keywords = f"{full_table} {' '.join(cols)}"
 
                         docs.append(doc)
-                        tokenized.append(self.tokenize(keywords))
                         doc_types.append("table")
 
                     # ================= FUNCTION =================
@@ -233,19 +195,18 @@ teacher_type country nationality region geo filter mapping
                         keywords = f"{full_name} {short_name} {definition}"
 
                         docs.append(doc)
-                        tokenized.append(self.tokenize(keywords))
                         doc_types.append("function")
-
-        # ===== BM25 =====
-        self.bm25 = BM25Okapi(tokenized)
 
         # ===== EMBEDDINGS =====
         print("🔹 Creating embeddings via HF API...")
         self.embeddings = hf_embed(docs)
 
+        # ⭐ normalize vector để dùng cosine similarity chuẩn
+        norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
+        self.embeddings = self.embeddings / norms
+
         self.schema_docs = docs
         self.doc_types = doc_types
-        self.tokenized_corpus = tokenized
         self.is_ready = True
 
         print(f"✅ Indexed {len(docs)} schema objects")
@@ -277,39 +238,30 @@ Return keywords only.
             return query
 
     # =====================================================
-    # HYBRID RETRIEVAL (CORE)
-    # =====================================================
     def retrieve(self, query, expanded_query, top_k=20):
         if not self.is_ready:
             return ""
 
         full_query = f"{query} {expanded_query}"
 
-        # ---------- BM25 ----------
-        bm25_scores = self.bm25.get_scores(self.tokenize(full_query))
-        bm25_scores = np.array(bm25_scores)
-
-        # ---------- VECTOR SEARCH ----------
-        # ---------- VECTOR SEARCH (NO FAISS) ----------
+        # ===== EMBEDDING QUERY =====
         q_embed = hf_embed([full_query])[0]
 
-        # ⭐ normalize query vector
-        q_embed = q_embed / np.clip(np.linalg.norm(q_embed), 1e-12, None)
+        # normalize query vector
+        q_embed = q_embed / np.linalg.norm(q_embed)
 
-        vector_scores = np.dot(self.embeddings, q_embed)
+        # ===== COSINE SIMILARITY =====
+        scores = np.dot(self.embeddings, q_embed)
 
-        # ---------- HYBRID SCORE ----------
-        hybrid = 0.5 * bm25_scores + 0.5 * vector_scores
-
-        # ---------- FUNCTION BOOST ----------
+        # ===== FUNCTION BOOST (giữ lại logic cũ) =====
         if "func_" in full_query.lower():
             for i, t in enumerate(self.doc_types):
                 if t == "function":
-                    hybrid[i] *= 1.5
+                    scores[i] *= 1.3
 
-        # ---------- TOP K ----------
-        top_idx = np.argsort(hybrid)[::-1][:top_k]
-        results = [self.schema_docs[i] for i in top_idx if hybrid[i] > 0]
+        # ===== TOP K =====
+        top_idx = np.argsort(scores)[::-1][:top_k]
+        results = [self.schema_docs[i] for i in top_idx if scores[i] > 0.15]
 
         return "\n----------------------\n".join(results)
 
