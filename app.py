@@ -41,12 +41,16 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
     """
-    OpenRouter embedding chuẩn (batch support + format đúng spec mới)
-    Trả về numpy array shape (n_texts, dim)
+    OpenRouter embedding (production safe)
+    - chống crash khi OpenRouter trả HTML / text
+    - log lỗi rõ ràng khi deploy Render
     """
 
     if isinstance(texts, str):
         texts = [texts]
+
+    if not OPENROUTER_API_KEY:
+        raise ValueError("❌ Missing OPENROUTER_API_KEY")
 
     url = "https://openrouter.ai/api/v1/embeddings"
 
@@ -65,18 +69,22 @@ def openrouter_embedding(texts, model="qwen/qwen3-embedding-8b"):
 
     res = requests.post(url, headers=headers, json=payload)
 
+    # 🔴 Nếu OpenRouter trả lỗi → in FULL body để debug Render
     if res.status_code != 200:
-        raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
+        raise ValueError(f"❌ OpenRouter HTTP {res.status_code}: {res.text}")
 
-    result = res.json()
+    # 🔴 BẮT lỗi HTML / text response (nguyên nhân crash của bạn)
+    try:
+        result = res.json()
+    except Exception:
+        raise ValueError(f"❌ OpenRouter returned NON-JSON response:\n{res.text}")
 
-    # 🔥 format chuẩn OpenRouter:
-    # {
-    #   "data":[ {"embedding":[...]} ]
-    # }
+    # 🔴 BẮT lỗi provider fail (rất hay gặp)
+    if "error" in result:
+        raise ValueError(f"❌ OpenRouter provider error: {result}")
 
     if "data" not in result:
-        raise ValueError(f"Invalid embedding response: {result}")
+        raise ValueError(f"❌ Invalid embedding response: {result}")
 
     embeddings = [item["embedding"] for item in result["data"]]
     return np.array(embeddings, dtype="float32")
