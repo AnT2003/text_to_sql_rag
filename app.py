@@ -10,7 +10,7 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
 from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
-import faiss
+import requests
 from sentence_transformers import SentenceTransformer
 import numpy as np
 # =========================================================
@@ -36,6 +36,7 @@ OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
@@ -88,6 +89,18 @@ def get_chat_history_formatted(session_id, limit=10):
 # =========================================================
 
 # =========================================================
+# HuggingFace Embedding API (NO LOCAL MODEL)
+# =========================================================
+def hf_embed(texts):
+    url = "https://api-inference.huggingface.co/pipeline/feature-extraction/BAAI/bge-m3"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+    response = requests.post(url, headers=headers, json={"inputs": texts})
+    result = response.json()
+
+    return np.array(result).astype("float32")
+
+# =========================================================
 #  NEW HYBRID RAG ENGINE (BM25 + EMBEDDING + BOOST)
 # =========================================================
 
@@ -99,10 +112,8 @@ class RAGEngine:
         self.bm25 = None
         
         # 🔥 NEW: semantic search
-        print("🔹 Loading embedding model BGE-M3...")
-        self.embed_model = SentenceTransformer("BAAI/bge-m3")
+        print("🔹 Using HuggingFace Embedding API (serverless)")
         self.embeddings = None
-        self.index = None
         
         self.is_ready = False
 
@@ -197,14 +208,8 @@ teacher_type country nationality region geo filter mapping
         self.bm25 = BM25Okapi(tokenized)
 
         # ===== EMBEDDINGS =====
-        print("🔹 Creating embeddings...")
-        embeddings = self.embed_model.encode(docs, normalize_embeddings=True)
-        self.embeddings = np.array(embeddings).astype("float32")
-
-        # ===== FAISS INDEX =====
-        dim = self.embeddings.shape[1]
-        self.index = faiss.IndexFlatIP(dim)
-        self.index.add(self.embeddings)
+        print("🔹 Creating embeddings via HF API...")
+        self.embeddings = hf_embed(docs)
 
         self.schema_docs = docs
         self.doc_types = doc_types
@@ -253,10 +258,10 @@ Return keywords only.
         bm25_scores = np.array(bm25_scores)
 
         # ---------- VECTOR SEARCH ----------
-        q_embed = self.embed_model.encode([full_query], normalize_embeddings=True)
-        D, I = self.index.search(np.array(q_embed).astype("float32"), len(self.schema_docs))
-        vector_scores = np.zeros(len(self.schema_docs))
-        vector_scores[I[0]] = D[0]
+        # ---------- VECTOR SEARCH (NO FAISS) ----------
+        q_embed = hf_embed([full_query])[0]
+
+        vector_scores = np.dot(self.embeddings, q_embed)
 
         # ---------- HYBRID SCORE ----------
         hybrid = 0.5 * bm25_scores + 0.5 * vector_scores
@@ -421,7 +426,7 @@ User Question:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Init DB & RAG trước khi run app
     init_db()
     rag_engine.load_schemas()
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
