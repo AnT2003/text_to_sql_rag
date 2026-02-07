@@ -9,6 +9,7 @@ from ollama import Client
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
+from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
 import requests
 import numpy as np
 # =========================================================
@@ -31,7 +32,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 OLLAMA_HOST = "https://ollama.com"
-MODEL_NAME = "gemini-3-flash-preview"
+MODEL_NAME = "gpt-oss:120b"
 DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
 # =========================================================
@@ -39,42 +40,33 @@ SCHEMA_FOLDER = "./schemas"
 # =========================================================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-def openrouter_embedding(texts, model="sentence-transformers/paraphrase-minilm-l6-v2"):
-    import numpy as np
-    if isinstance(texts, str):
-        texts = [texts]
-
-    if not OPENROUTER_API_KEY:
-        raise ValueError("❌ Missing OPENROUTER_API_KEY")
-
+def openrouter_embedding(texts, model="google/gemini-embedding-001"):
+    """
+    Trả về numpy array embeddings từ OpenRouter API
+    """
     url = "https://openrouter.ai/api/v1/embeddings"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
-        "X-Title": "Text2SQL RAG"
+        "HTTP-Referer": "http://localhost:3000",  # optional
+        "X-Title": "Data Analysis Project"        # optional
     }
     payload = {
         "model": model,
-        "input": texts,
-        "encoding_format": "float"
+        "input": texts
     }
+    res = requests.post(url, headers=headers, json=payload)
+    if res.status_code != 200:
+        raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
+    response_data = res.json()
+    embeddings = np.array([item["embedding"] for item in response_data["data"]], dtype="float32")
 
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        res.raise_for_status()
-        text = res.text.strip()  # remove leading/trailing whitespace
-        data = json.loads(text)
-        if "data" not in data:
-            print("⚠️ OpenRouter response missing 'data', returning zero vector")
-            return np.zeros((len(texts), 4096), dtype="float32")  # fallback
-        return np.array([item["embedding"] for item in data["data"]], dtype="float32")
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON decode error: {e}, response:\n{text}")
-        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
-    except Exception as e:
-        print(f"⚠️ OpenRouter embedding error: {e}, returning zero vector")
-        return np.zeros((len(texts), 4096), dtype="float32")  # fallback
+# ⭐ normalize để dùng cosine similarity
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / np.clip(norms, 1e-12, None)
+
+    return embeddings
+
 
 # =========================================================
 #  PHẦN 2: DATABASE MODELS
@@ -142,18 +134,37 @@ class RAGEngine:
         self.schema_docs = []
         self.doc_types = []          # table / function
         self.tokenized_corpus = []
+        self.bm25 = None
         
         # 🔥 NEW: semantic search
         print("🔹 Using HuggingFace Embedding API (serverless)")
         self.embeddings = None
         
         self.is_ready = False
+
+    # =====================================================
+    # TOKENIZER (GIỮ NGUYÊN snake_case !!!)
+    # =====================================================
+    def tokenize(self, text):
+        text = str(text)
+        text = re.sub(r'[.\-\(\),`]', ' ', text)  # KHÔNG xóa _
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+        tokens = text.lower().split()
+
+        stopwords = {
+            'string','int64','float','boolean','timestamp','date',
+            'table','dataset','project','nullable','mode','type',
+            'description','record','create','replace','function'
+        }
+        return [t for t in tokens if t not in stopwords and len(t) > 1]
+
     # =====================================================
     # LOAD SCHEMA + BUILD HYBRID INDEX
     # =====================================================
     def load_schemas(self):
         print("🚀 Building Hybrid RAG Index...")
         docs = []
+        tokenized = []
         doc_types = []
 
         json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
@@ -187,6 +198,7 @@ teacher tutor student booking invoice complaint payment order lesson class
                         keywords = f"{full_table} {' '.join(cols)}"
 
                         docs.append(doc)
+                        tokenized.append(self.tokenize(keywords))
                         doc_types.append("table")
 
                     # ================= FUNCTION =================
@@ -207,20 +219,22 @@ Business purpose:
 helper business logic mapping classification segmentation
 teacher_type country nationality region geo filter mapping
 """
+                        keywords = f"{full_name} {short_name} {definition}"
 
                         docs.append(doc)
+                        tokenized.append(self.tokenize(keywords))
                         doc_types.append("function")
+
+        # ===== BM25 =====
+        self.bm25 = BM25Okapi(tokenized)
 
         # ===== EMBEDDINGS =====
         print("🔹 Creating embeddings via HF API...")
         self.embeddings = hf_embed(docs)
 
-        # ⭐ normalize vector để dùng cosine similarity chuẩn
-        norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
-        self.embeddings = self.embeddings / norms
-
         self.schema_docs = docs
         self.doc_types = doc_types
+        self.tokenized_corpus = tokenized
         self.is_ready = True
 
         print(f"✅ Indexed {len(docs)} schema objects")
@@ -252,45 +266,39 @@ Return keywords only.
             return query
 
     # =====================================================
-    def retrieve(self, query, expanded_query, top_k=20, min_score=0.2):
-        """
-        Trả về top_k schema documents dựa trên embedding cosine similarity.
-        expanded_query: từ bước query expansion
-        min_score: ngưỡng similarity để lọc các doc quá yếu
-        """
+    # HYBRID RETRIEVAL (CORE)
+    # =====================================================
+    def retrieve(self, query, expanded_query, top_k=20):
         if not self.is_ready:
             return ""
 
         full_query = f"{query} {expanded_query}"
 
-        # ===== EMBEDDING QUERY =====
+        # ---------- BM25 ----------
+        bm25_scores = self.bm25.get_scores(self.tokenize(full_query))
+        bm25_scores = np.array(bm25_scores)
+
+        # ---------- VECTOR SEARCH ----------
+        # ---------- VECTOR SEARCH (NO FAISS) ----------
         q_embed = hf_embed([full_query])[0]
 
-        # normalize query vector
-        q_norm = np.linalg.norm(q_embed)
-        if q_norm > 0:
-            q_embed = q_embed / q_norm
+        # ⭐ normalize query vector
+        q_embed = q_embed / np.clip(np.linalg.norm(q_embed), 1e-12, None)
 
-        # normalize document embeddings
-        doc_norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
-        doc_norms[doc_norms == 0] = 1  # tránh chia cho 0
-        embeddings_norm = self.embeddings / doc_norms
+        vector_scores = np.dot(self.embeddings, q_embed)
 
-        # ===== COSINE SIMILARITY =====
-        scores = np.dot(embeddings_norm, q_embed)
+        # ---------- HYBRID SCORE ----------
+        hybrid = 0.5 * bm25_scores + 0.5 * vector_scores
 
-        # ===== FUNCTION BOOST (giữ logic cũ) =====
+        # ---------- FUNCTION BOOST ----------
         if "func_" in full_query.lower():
             for i, t in enumerate(self.doc_types):
                 if t == "function":
-                    scores[i] *= 1.3
+                    hybrid[i] *= 1.5
 
-        # ===== LỌC theo ngưỡng =====
-        filtered_idx = np.where(scores >= min_score)[0]
-
-        # ===== TOP K =====
-        top_idx = filtered_idx[np.argsort(scores[filtered_idx])[::-1][:top_k]]
-        results = [self.schema_docs[i] for i in top_idx]
+        # ---------- TOP K ----------
+        top_idx = np.argsort(hybrid)[::-1][:top_k]
+        results = [self.schema_docs[i] for i in top_idx if hybrid[i] > 0]
 
         return "\n----------------------\n".join(results)
 
@@ -359,8 +367,9 @@ def chat():
         # Nếu câu hỏi quá ngắn, AI sẽ giúp đoán các bảng liên quan
         expanded_keywords = rag_engine.query_expansion(user_msg, api_key)
         
+        # BƯỚC 2: BM25 RETRIEVAL (Tìm kiếm chính xác cao)
         # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
-        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=10)
+        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=20)
 
         # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
         system_prompt = f"""Role: Senior BigQuery SQL Architect.
@@ -442,6 +451,3 @@ if __name__ == '__main__':
     rag_engine.load_schemas()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-
-
