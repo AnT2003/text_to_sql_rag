@@ -116,7 +116,7 @@ def get_chat_history_formatted(session_id, limit=10):
         return []
 
 # =========================================================
-# PHẦN 3: ADVANCED RAG ENGINE (TECH UPGRADE: DIRECT SCHEMA LINKING)
+# PHẦN 3: ADVANCED RAG ENGINE (AGENTIC SCHEMA SELECTION)
 # =========================================================
 
 def hf_embed(texts):
@@ -125,34 +125,28 @@ def hf_embed(texts):
 class RAGEngine:
     def __init__(self):
         self.schema_docs = []
-        self.schema_metadata = [] # Lưu thông tin định danh: {name, type}
-        self.doc_types = []       # table / function
+        self.schema_metadata = [] 
+        self.doc_types = []       
         self.tokenized_corpus = []
         self.bm25 = None
         self.embeddings = None
+        self.schema_registry = {} # Dict lưu full schema để truy xuất nhanh
         self.is_ready = False
 
     def tokenize(self, text):
         text = str(text)
-        # GIỮ NGUYÊN snake_case cho tên bảng, chỉ tách ký tự đặc biệt khác
         text = re.sub(r'[.\-\(\),`]', ' ', text)
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
         tokens = text.lower().split()
-
-        stopwords = {
-            'string','int64','float','boolean','timestamp','date',
-            'table','dataset','project','nullable','mode','type',
-            'description','record','create','replace','function'
-        }
+        stopwords = {'string','int64','float','boolean','timestamp','date','table','dataset','project','nullable','mode','type','description','record','create','replace','function'}
         return [t for t in tokens if t not in stopwords and len(t) > 1]
 
     def load_schemas(self):
-        print("🚀 Building Advanced Hybrid RAG Index...")
+        print("🚀 Building Advanced Schema Registry...")
         docs = []
         tokenized = []
         metadata = []
         doc_types = []
-
         json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
 
         for file_path in json_files:
@@ -164,13 +158,12 @@ class RAGEngine:
                     if 'table_name' in item:
                         name = item['table_name']
                         dataset = item.get('table_schema', 'kynaforkids')
-                        project = "kynaforkids-server-production"
-                        full_table = f"`{project}.{dataset}.{name}`"
-
+                        full_table = f"`kynaforkids-server-production.{dataset}.{name}`"
                         raw_cols = item.get("columns", "[]")
                         cols = json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols
                         
                         doc = f"[TABLE] {full_table}\nCOLUMNS: {', '.join(cols)}"
+                        self.schema_registry[name] = doc
                         docs.append(doc)
                         tokenized.append(self.tokenize(f"{name} {' '.join(cols)}"))
                         metadata.append({"name": name, "type": "table", "full": full_table})
@@ -183,6 +176,7 @@ class RAGEngine:
                         full_name = f"`kynaforkids-server-production.kynaforkids.{name}`"
                         
                         doc = f"[FUNCTION] {full_name}\nARGS: {args}\nLOGIC: {definition}"
+                        self.schema_registry[name] = doc
                         docs.append(doc)
                         tokenized.append(self.tokenize(f"{name} {definition}"))
                         metadata.append({"name": name, "type": "function", "full": full_name})
@@ -192,46 +186,29 @@ class RAGEngine:
         self.embeddings = hf_embed(docs)
         self.schema_docs = docs
         self.schema_metadata = metadata
-        self.doc_types = doc_types
         self.is_ready = True
-        print(f"✅ Indexed {len(docs)} schema objects")
+        print(f"✅ Indexed {len(docs)} objects.")
 
-    def query_expansion(self, query, api_key):
-        try:
-            client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
-            prompt = f"Identify potential table names, columns, and functions for: {query}. Return keywords only."
-            res = client.chat(model=MODEL_NAME, messages=[{"role":"user","content":prompt}], options={"temperature":0})
-            return res['message']['content']
-        except:
-            return query
-
-    def retrieve(self, query, expanded_query, top_k=15):
+    def retrieve(self, query, expanded_query, top_k=10):
         if not self.is_ready: return ""
         full_query = f"{query} {expanded_query}".lower()
-
-        # 1. BM25 & Vector Search
         bm25_scores = np.array(self.bm25.get_scores(self.tokenize(full_query)))
         q_embed = hf_embed([full_query])[0]
         q_embed = q_embed / np.clip(np.linalg.norm(q_embed), 1e-12, None)
         vector_scores = np.dot(self.embeddings, q_embed)
 
-        # 2. Hybrid Score (Normalized)
         if np.max(bm25_scores) > 0: bm25_scores /= np.max(bm25_scores)
-        hybrid_scores = 0.5 * bm25_scores + 0.5 * vector_scores
+        hybrid_scores = 0.4 * bm25_scores + 0.6 * vector_scores
 
-        # 3. DIRECT SCHEMA LINKING (The "LLM Notebook" technique)
-        # Nếu câu hỏi chứa chính xác tên bảng hoặc tên hàm, ta Boost cực mạnh
+        # RE-RANKING: Nếu trùng tên định danh bảng/hàm trong câu hỏi
         for i, meta in enumerate(self.schema_metadata):
             if meta['name'].lower() in full_query:
-                hybrid_scores[i] += 2.0 # Boost mạnh để bảng đúng luôn đứng đầu
-            
-            # Boost thêm cho function nếu query có keywords nghiệp vụ
+                hybrid_scores[i] += 2.0
             if meta['type'] == 'function' and any(kw in full_query for kw in ['country', 'status', 'rating']):
                 hybrid_scores[i] += 0.5
 
         top_idx = np.argsort(hybrid_scores)[::-1][:top_k]
-        results = [self.schema_docs[i] for i in top_idx if hybrid_scores[i] > 0.1]
-        return "\n----------------------\n".join(results)
+        return "\n\n---\n\n".join([self.schema_docs[i] for i in top_idx if hybrid_scores[i] > 0.1])
 
 # Khởi tạo
 rag_engine = RAGEngine()
@@ -260,37 +237,32 @@ def chat():
     save_message(session_id, "user", user_msg)
 
     try:
-        # Step 1: Query Expansion
-        expanded = rag_engine.query_expansion(user_msg, api_key)
+        # STEP 1: SCHEMA SELECTION (Identify entities first)
+        client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
+        selector_prompt = f"Identify the specific table names and function names from the query: '{user_msg}'. Return ONLY names separated by comma."
+        selector_res = client.chat(model=MODEL_NAME, messages=[{"role": "user", "content": selector_prompt}])
+        expanded_keywords = selector_res['message']['content']
         
-        # Step 2: Advanced Retrieval (với Direct Linking Boost)
-        relevant_schemas = rag_engine.retrieve(user_msg, expanded)
+        # STEP 2: RETRIEVE DETAILED CONTEXT
+        relevant_context = rag_engine.retrieve(user_msg, expanded_keywords)
 
-        # Step 3: Prompt Engineering
+        # STEP 3: FINAL SQL GENERATION
         system_prompt = f"""Role: Senior BigQuery SQL Architect.
-Task: Generate an accurate Google BigQuery Standard SQL query based on the provided Context.
+Task: Generate Standard SQL query strictly using the provided context.
 
-==================== CONTEXT (SOURCE OF TRUTH) ====================
-{relevant_schemas}
-===================================================================
+==================== CONTEXT ====================
+{relevant_context}
+=================================================
 
-==================== STRICT RULES ====================
-1. MANDATORY TABLE LINKING:
-   - Identify if the user mentions a specific table (e.g., 'booking_session'). 
-   - If 'booking_session' is requested, you MUST use it. Do NOT use 'Test_student_teacher' for booking logic.
-2. FUNCTION LOGIC:
-   - Use provided functions for country, rating, or status logic.
-   - Example: `dataset.func_get_country(id) = 'Việt Nam'`.
-3. SYNTAX:
-   - Use backticks: `project.dataset.table`.
-   - Return ONLY the SQL block and a short logic explanation.
-4. NO HALLUCINATION: If a column is not in Context, do not use it.
-======================================================
-
-User Question: {user_msg}
+STRICT RULES:
+1. TARGET TABLE: If 'booking_session' is requested, you MUST use it. DO NOT JOIN with 'qc_booking_test' or other random tables unless explicitly found in context and required.
+2. BUSINESS LOGIC: 
+   - Check FUNCTION LOGIC for definitions of 'completed' (status) and 'standard' (rating).
+   - Use functions directly: `func_get_booking_student_country(id) = 'Việt Nam'`.
+3. SYNTAX: Use backticks: `project.dataset.table`. No comments outside the sql block.
+4. NO HALLUCINATION: If a column or table is not in CONTEXT, do not use it.
 """
 
-        client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
         response = client.chat(
             model=MODEL_NAME,
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_msg}],
