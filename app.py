@@ -3,63 +3,75 @@ import json
 import glob
 import datetime
 import re
-import requests
-import numpy as np
 from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 from ollama import Client
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
-from rank_bm25 import BM25Okapi
+from rank_bm25 import BM25Okapi  # <--- THƯ VIỆN RAG MẠNH MẼ
+import requests
+import numpy as np
+# =========================================================
+#  PHẦN 1: CONFIG & SETUP
+# =========================================================
 
-# =========================================================
-# CONFIG & SETUP
-# =========================================================
 load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-db_url = os.getenv("DATABASE_URL", "sqlite:///local_chat.db")
+db_url = os.getenv("DATABASE_URL")
+if not db_url:
+    db_url = "sqlite:///local_chat.db"
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url  
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 db = SQLAlchemy(app)
 
-OLLAMA_HOST = "https://ollama.com" # Hoặc endpoint local của bạn
+OLLAMA_HOST = "https://ollama.com"
 MODEL_NAME = "gpt-oss:120b"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+DEFAULT_API_KEY = os.getenv("OLLAMA_API_KEY")
 SCHEMA_FOLDER = "./schemas"
+# =========================================================
+#  PHẦN 1B: OpenRouter Embedding (thay HF cũ)
+# =========================================================
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") 
 
-# =========================================================
-# UTILS & EMBEDDING
-# =========================================================
 def openrouter_embedding(texts, model="sentence-transformers/all-minilm-l12-v2"):
-    if not OPENROUTER_API_KEY:
-        # Nếu không có key, trả về vector 0 để tránh crash, nhưng khuyến khích config key
-        return np.zeros((len(texts), 768), dtype="float32")
-    
+    """
+    Trả về numpy array embeddings từ OpenRouter API
+    """
     url = "https://openrouter.ai/api/v1/embeddings"
-    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": model, "input": texts}
-    
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        if res.status_code != 200:
-            return np.zeros((len(texts), 768), dtype="float32")
-        
-        data = res.json()
-        embeddings = np.array([item["embedding"] for item in data["data"]], dtype="float32")
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        return embeddings / np.clip(norms, 1e-12, None)
-    except:
-        return np.zeros((len(texts), 768), dtype="float32")
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:3000",  # optional
+        "X-Title": "Data Analysis Project"        # optional
+    }
+    payload = {
+        "model": model,
+        "input": texts
+    }
+    res = requests.post(url, headers=headers, json=payload)
+    if res.status_code != 200:
+        raise ValueError(f"OpenRouter Error [{res.status_code}]: {res.text}")
+    response_data = res.json()
+    embeddings = np.array([item["embedding"] for item in response_data["data"]], dtype="float32")
+
+# ⭐ normalize để dùng cosine similarity
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    embeddings = embeddings / np.clip(norms, 1e-12, None)
+
+    return embeddings
+
 
 # =========================================================
-# DATABASE MODELS
+#  PHẦN 2: DATABASE MODELS
 # =========================================================
+
 class Session(db.Model):
     __tablename__ = 'sessions'
     id = db.Column(db.String(50), primary_key=True)
@@ -69,129 +81,236 @@ class Session(db.Model):
 class Message(db.Model):
     __tablename__ = 'messages'
     id = db.Column(db.Integer, primary_key=True)
-    session_id = db.Column(db.String(50), db.ForeignKey('sessions.id', ondelete="CASCADE"), nullable=False)
+    session_id = db.Column(db.String(50), db.ForeignKey('sessions.id',ondelete="CASCADE"), nullable=False)
     role = db.Column(db.String(20), nullable=False)
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
+def init_db():
+    with app.app_context():
+        db.create_all()
+
+def save_message(session_id, role, content):
+    try:
+        new_msg = Message(session_id=session_id, role=role, content=content)
+        db.session.add(new_msg)
+        db.session.commit()
+    except:
+        db.session.rollback()
+
+def create_session_if_not_exists(session_id, first_msg):
+    try:
+        if not Session.query.get(session_id):
+            title = (first_msg[:50] + '...') if len(first_msg) > 50 else first_msg
+            db.session.add(Session(id=session_id, title=title))
+            db.session.commit()
+    except:
+        db.session.rollback()
+
+def get_chat_history_formatted(session_id, limit=10):
+    try:
+        msgs = Message.query.filter_by(session_id=session_id).order_by(desc(Message.created_at)).limit(limit).all()
+        return [{"role": m.role, "content": m.content} for m in msgs[::-1]]
+    except:
+        return []
+
 # =========================================================
-# ADVANCED RAG ENGINE (TECH UPGRADE)
+#  PHẦN 3: ADVANCED RAG ENGINE (CORE LOGIC)
 # =========================================================
-class AdvancedRAGEngine:
+
+# =========================================================
+# HuggingFace Embedding API (NO LOCAL MODEL)
+# =========================================================
+def hf_embed(texts):
+    # Chuyển sang OpenRouter
+    return openrouter_embedding(texts)
+
+# =========================================================
+#  NEW HYBRID RAG ENGINE (BM25 + EMBEDDING + BOOST)
+# =========================================================
+
+class RAGEngine:
     def __init__(self):
-        self.schema_metadata = [] # Lưu object chi tiết
-        self.schema_docs = []     # Lưu text để search
+        self.schema_docs = []
+        self.doc_types = []          # table / function
+        self.tokenized_corpus = []
         self.bm25 = None
+        
+        # 🔥 NEW: semantic search
+        print("🔹 Using HuggingFace Embedding API (serverless)")
         self.embeddings = None
+        
         self.is_ready = False
 
+    # =====================================================
+    # TOKENIZER (GIỮ NGUYÊN snake_case !!!)
+    # =====================================================
     def tokenize(self, text):
-        # Giữ nguyên snake_case cực kỳ quan trọng cho tên bảng SQL
-        text = str(text).lower()
-        # Loại bỏ ký tự đặc biệt nhưng giữ dấu gạch dưới
-        text = re.sub(r'[^a-z0-0_\s]', ' ', text)
-        tokens = text.split()
-        return [t for t in tokens if len(t) > 1]
+        text = str(text)
+        text = re.sub(r'[.\-\(\),`]', ' ', text)  # KHÔNG xóa _
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+        tokens = text.lower().split()
 
+        stopwords = {
+            'string','int64','float','boolean','timestamp','date',
+            'table','dataset','project','nullable','mode','type',
+            'description','record','create','replace','function'
+        }
+        return [t for t in tokens if t not in stopwords and len(t) > 1]
+
+    # =====================================================
+    # LOAD SCHEMA + BUILD HYBRID INDEX
+    # =====================================================
     def load_schemas(self):
-        print("🚀 Building Advanced Schema Index...")
-        docs, metadata, tokenized_corpus = [], [], []
+        print("🚀 Building Hybrid RAG Index...")
+        docs = []
+        tokenized = []
+        doc_types = []
+
         json_files = glob.glob(os.path.join(SCHEMA_FOLDER, "*.json"))
 
         for file_path in json_files:
             with open(file_path, 'r', encoding='utf-8') as f:
-                try:
-                    items = json.load(f)
-                    if not isinstance(items, list): items = [items]
+                data = json.load(f)
+                items = data if isinstance(data, list) else [data]
 
-                    for item in items:
-                        if 'table_name' in item:
-                            name = item['table_name']
-                            dataset = item.get('table_schema', 'kynaforkids')
-                            full_table = f"`kynaforkids-server-production.{dataset}.{name}`"
-                            
-                            raw_cols = item.get("columns", "[]")
-                            cols = json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols
-                            
-                            # Enrichment: Thêm nhiều từ khóa nghiệp vụ vào doc search
-                            doc_content = f"TABLE_ENTITY: {name} FULL_PATH: {full_table} COLUMNS: {' '.join(cols)} KEYWORDS: {name.replace('_', ' ')}"
-                            docs.append(doc_content)
-                            tokenized_corpus.append(self.tokenize(doc_content))
-                            metadata.append({"type": "table", "name": name, "full": full_table, "cols": cols})
+                for item in items:
 
-                        elif 'routine_name' in item:
-                            name = item['routine_name']
-                            definition = item.get('routine_definition', '')
-                            full_func = f"`kynaforkids-server-production.kynaforkids.{name}`"
-                            
-                            doc_content = f"FUNCTION_ENTITY: {name} LOGIC: {definition} KEYWORDS: {name.replace('_', ' ')}"
-                            docs.append(doc_content)
-                            tokenized_corpus.append(self.tokenize(doc_content))
-                            metadata.append({"type": "function", "name": name, "full": full_func, "definition": definition})
-                except Exception as e:
-                    print(f"Error loading {file_path}: {e}")
+                    # ================= TABLE =================
+                    if 'table_name' in item:
+                        dataset = item.get('table_schema')
+                        project = "kynaforkids-server-production"
+                        full_table = f"`{project}.{dataset}.{item['table_name']}`"
 
-        if docs:
-            self.bm25 = BM25Okapi(tokenized_corpus)
-            self.embeddings = openrouter_embedding(docs)
-            self.schema_docs = docs
-            self.schema_metadata = metadata
-            self.is_ready = True
-        print(f"✅ Indexed {len(docs)} objects.")
+                        cols = []
+                        raw_cols = item.get("columns", "[]")
+                        parsed_cols = json.loads(raw_cols) if isinstance(raw_cols, str) else raw_cols
+                        if isinstance(parsed_cols, list):
+                            cols = parsed_cols
 
-    def retrieve(self, query, top_k=10):
-        if not self.is_ready: return ""
+                        doc = f"""
+[TABLE] {full_table}
+Columns: {', '.join(cols)}
 
-        # 1. Hybrid Search (BM25 + Vector)
-        tokens = self.tokenize(query)
-        bm25_scores = np.array(self.bm25.get_scores(tokens))
-        
-        q_embed = openrouter_embedding([query])[0]
+Business keywords:
+teacher tutor student booking invoice complaint payment order lesson class
+"""
+                        keywords = f"{full_table} {' '.join(cols)}"
+
+                        docs.append(doc)
+                        tokenized.append(self.tokenize(keywords))
+                        doc_types.append("table")
+
+                    # ================= FUNCTION =================
+                    elif 'routine_name' in item:
+                        short_name = item['routine_name']
+                        definition = item.get('routine_definition', '')
+                        arguments = item.get('arguments', '')
+                        full_name = f"`kynaforkids-server-production.kynaforkids.{short_name}`"
+                        doc = f"""
+[FUNCTION] `{full_name}`
+
+Arguments: {arguments}
+
+SQL Logic:
+{definition}
+
+Business purpose:
+helper business logic mapping classification segmentation
+teacher_type country nationality region geo filter mapping
+"""
+                        keywords = f"{full_name} {short_name} {definition}"
+
+                        docs.append(doc)
+                        tokenized.append(self.tokenize(keywords))
+                        doc_types.append("function")
+
+        # ===== BM25 =====
+        self.bm25 = BM25Okapi(tokenized)
+
+        # ===== EMBEDDINGS =====
+        print("🔹 Creating embeddings via HF API...")
+        self.embeddings = hf_embed(docs)
+
+        self.schema_docs = docs
+        self.doc_types = doc_types
+        self.tokenized_corpus = tokenized
+        self.is_ready = True
+
+        print(f"✅ Indexed {len(docs)} schema objects")
+
+    # =====================================================
+    # QUERY EXPANSION (LLM)
+    # =====================================================
+    def query_expansion(self, query, api_key):
+        try:
+            client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
+            prompt = f"""
+Convert the user question into database search keywords.
+Include:
+- tables
+- columns
+- functions
+- synonyms
+
+User: {query}
+Return keywords only.
+"""
+            res = client.chat(
+                model=MODEL_NAME,
+                messages=[{"role":"user","content":prompt}],
+                options={"temperature":0}
+            )
+            return res['message']['content']
+        except:
+            return query
+
+    # =====================================================
+    # HYBRID RETRIEVAL (CORE)
+    # =====================================================
+    def retrieve(self, query, expanded_query, top_k=20):
+        if not self.is_ready:
+            return ""
+
+        full_query = f"{query} {expanded_query}"
+
+        # ---------- BM25 ----------
+        bm25_scores = self.bm25.get_scores(self.tokenize(full_query))
+        bm25_scores = np.array(bm25_scores)
+
+        # ---------- VECTOR SEARCH ----------
+        # ---------- VECTOR SEARCH (NO FAISS) ----------
+        q_embed = hf_embed([full_query])[0]
+
+        # ⭐ normalize query vector
+        q_embed = q_embed / np.clip(np.linalg.norm(q_embed), 1e-12, None)
+
         vector_scores = np.dot(self.embeddings, q_embed)
-        
-        # Normalize scores về 0-1
-        if np.max(bm25_scores) > 0:
-            bm25_scores = bm25_scores / np.max(bm25_scores)
-        
-        # 2. Advanced Scoring Logic
-        # Kết hợp trọng số: BM25 (từ khóa chính xác) + Vector (ý nghĩa ngữ nghĩa)
-        combined_scores = 0.5 * bm25_scores + 0.5 * vector_scores
 
-        # 3. Entity-Based Re-ranking (Cực kỳ quan trọng để sửa lỗi chọn sai bảng)
-        # Nếu người dùng nhắc tên bảng gần đúng hoặc chính xác, ta ép bảng đó lên đầu
-        query_clean = query.lower()
-        for i, meta in enumerate(self.schema_metadata):
-            name_lower = meta['name'].lower()
-            # Kiểm tra match chính xác hoặc match một phần quan trọng (ví dụ 'booking' trong 'booking_session')
-            if name_lower in query_clean or any(part in query_clean for part in name_lower.split('_') if len(part) > 3):
-                combined_scores[i] += 1.5 # Boost cực mạnh cho bảng/hàm trùng tên
-            
-            # Boost thêm nếu là FUNCTION và người dùng hỏi về logic mapping/country/status
-            if meta['type'] == 'function' and any(kw in query_clean for kw in ['country', 'status', 'rating', 'loại', 'phân loại']):
-                combined_scores[i] += 0.5
+        # ---------- HYBRID SCORE ----------
+        hybrid = 0.5 * bm25_scores + 0.5 * vector_scores
 
-        # 4. Lọc và định dạng kết quả
-        top_indices = np.argsort(combined_scores)[::-1][:top_k]
-        
-        formatted_results = []
-        for idx in top_indices:
-            if combined_scores[idx] < 0.1: continue # Ngưỡng tối thiểu
-            m = self.schema_metadata[idx]
-            if m['type'] == 'table':
-                formatted_results.append(f"### TABLE: {m['full']}\n- Columns: {', '.join(m['cols'])}")
-            else:
-                # Chỉ lấy phần logic quan trọng nhất của hàm để tiết kiệm context
-                definition = m['definition']
-                if len(definition) > 1000: definition = definition[:1000] + "..."
-                formatted_results.append(f"### FUNCTION: {m['full']}\n- Logic:\n{definition}")
+        # ---------- FUNCTION BOOST ----------
+        if "func_" in full_query.lower():
+            for i, t in enumerate(self.doc_types):
+                if t == "function":
+                    hybrid[i] *= 1.5
 
-        return "\n\n".join(formatted_results)
+        # ---------- TOP K ----------
+        top_idx = np.argsort(hybrid)[::-1][:top_k]
+        results = [self.schema_docs[i] for i in top_idx if hybrid[i] > 0]
 
-rag_engine = AdvancedRAGEngine()
+        return "\n----------------------\n".join(results)
+
+# Khởi tạo RAG Engine
+rag_engine = RAGEngine()
+init_db()
+rag_engine.load_schemas()
 
 # =========================================================
-# API ROUTES
+#  PHẦN 4: API ROUTES
 # =========================================================
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -203,81 +322,132 @@ def get_sessions():
 
 @app.route('/api/history/<session_id>', methods=['GET'])
 def get_history(session_id):
+    return jsonify(get_chat_history_formatted(session_id, limit=50))
+
+@app.route('/api/clear_history', methods=['POST'])
+def clear_history():
     try:
-        msgs = Message.query.filter_by(session_id=session_id).order_by(Message.created_at).all()
-        return jsonify([{"role": m.role, "content": m.content} for m in msgs])
+        Message.query.delete()
+        Session.query.delete()
+        db.session.commit()
+        return jsonify({"status": "success"})
     except:
-        return jsonify([])
+        return jsonify({"status": "error"}), 500
+
+@app.route("/api/session/<session_id>", methods=["DELETE"])
+def delete_session(session_id):
+    try:
+        Message.query.filter_by(session_id=session_id).delete()
+        Session.query.filter_by(id=session_id).delete()
+        db.session.commit()
+        return jsonify({"status": "success"})
+    except:
+        return jsonify({"status": "error"}), 500
+
+@app.route('/api/reload', methods=['POST'])
+def reload_schema():
+    rag_engine.load_schemas()
+    return jsonify({"status": "success", "message": "RAG Index Rebuilt!"})
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.json
+    api_key = data.get('api_key') or DEFAULT_API_KEY
     user_msg = data.get('message')
     session_id = data.get('session_id')
-    api_key = os.getenv("OLLAMA_API_KEY")
 
-    if not session_id: return jsonify({"error": "Missing session_id"}), 400
+    if not api_key or not session_id:
+        return jsonify({"error": "Missing info"}), 400
 
-    # Lưu message user
-    new_msg = Message(session_id=session_id, role="user", content=user_msg)
-    db.session.add(new_msg)
-    db.session.commit()
-
-    # 1. Retrieval với kỹ thuật nâng cao
-    context = rag_engine.retrieve(user_msg)
-
-    # 2. Refined Prompt Engineering (Chain of Thought for SQL)
-    system_prompt = f"""You are an Expert BigQuery SQL Architect.
-Your task is to generate a Standard SQL query based ONLY on the provided schemas.
-
-### SCHEMA CONTEXT:
-{context}
-
-### STRICT INSTRUCTIONS:
-1. SCHEMA LINKING (MANDATORY):
-   - First, identify which tables and functions from the CONTEXT are actually relevant to the question.
-   - If the user explicitly mentions a table name like 'booking_session', you MUST prioritize it over other tables like 'Test_student_teacher'.
-   - NEVER use a table or column that is not in the context.
-
-2. BUSINESS LOGIC & FUNCTIONS:
-   - Use the provided FUNCTIONS for any logic related to country, rating, status, or types.
-   - Example: If a function `func_get_booking_status` exists, use it in the WHERE or SELECT clause.
-
-3. BIGQUERY STANDARDS:
-   - Always use fully qualified table names with backticks: `project.dataset.table`.
-   - Use CTEs (WITH clause) for complex logic.
-   - Use SAFE_DIVIDE for divisions.
-
-### OUTPUT FORMAT:
-- Start with a brief "Reasoning" section explaining which tables/functions you chose and why.
-- Then provide the SQL query in a ```sql block.
-"""
+    create_session_if_not_exists(session_id, user_msg)
+    save_message(session_id, "user", user_msg)
 
     try:
+        # BƯỚC 1: QUERY EXPANSION (Làm giàu ngữ nghĩa)
+        # Nếu câu hỏi quá ngắn, AI sẽ giúp đoán các bảng liên quan
+        expanded_keywords = rag_engine.query_expansion(user_msg, api_key)
+        
+        # BƯỚC 2: BM25 RETRIEVAL (Tìm kiếm chính xác cao)
+        # Chỉ lấy top 5 bảng liên quan nhất thay vì toàn bộ
+        relevant_schemas = rag_engine.retrieve(user_msg, expanded_keywords, top_k=20)
+
+        # BƯỚC 3: PROMPT ENGINEERING (Context-Aware Generation)
+        system_prompt = f"""Role: Senior BigQuery SQL Architect.
+Task: Generate an accurate Google BigQuery Standard SQL query strictly grounded in the provided schemas.
+
+==================== CONTEXT ====================
+{relevant_schemas}
+=================================================
+
+==================== HARD RULES (MUST FOLLOW) ====================
+
+1. SOURCE OF TRUTH (NO HALLUCINATION)
+- Use ONLY tables, columns, and routines that appear in CONTEXT.
+- If a column/table is not present → DO NOT use it.
+- Never assume generic columns (id, created_at, name, status, etc.).
+
+2. EXACT TABLE NAMING
+- Always use the FULLY QUALIFIED table name exactly as written in CONTEXT.
+- Always wrap table names with backticks: `project.dataset.table`.
+
+3. SCHEMA GROUNDING PROCESS (MANDATORY THINKING ORDER)
+Before writing SQL:
+Step 1 → Identify tables in CONTEXT that match the business question.
+Step 2 → Identify exact columns that answer the question.
+Step 3 → Verify joins only via columns that exist in schemas.
+Step 4 → Only then generate SQL.
+
+4. ROUTINE / FUNCTION LOGIC (CRITICAL)
+- For SELECT columns: use routines via `function(args)` syntax (do NOT extract full CASE WHEN code outside).
+- For WHERE / conditions: still refer to the routine definitions to get exact example values (e.g., id=5, status=4) rather than just using `function(args)`.
+- NEVER place routine inside FROM.
+
+5. BIGQUERY BEST PRACTICES (MANDATORY)
+- Use Google BigQuery Standard SQL.
+- Prefer CTEs (WITH) for multi-step logic.
+- Prefer JOIN instead of correlated subqueries.
+- Avoid SELECT * → select only needed columns.
+- Use SAFE_DIVIDE when dividing.
+- Use explicit GROUP BY when aggregating.
+
+6. OUTPUT FORMAT
+- Return ONLY one SQL query inside a ```sql``` block.
+- No markdown, no commentary outside the block.
+- After the SQL, provide a short explanation of the query and how routines are applied.
+
+=================================================
+
+User Question:
+{user_msg}
+"""
+
+        messages_payload = [{"role": "system", "content": system_prompt}]
+        history = get_chat_history_formatted(session_id, limit=6)
+        
+        for msg in history:
+            if msg['content'] != user_msg: # Tránh duplicate
+                messages_payload.append(msg)
+        
+        messages_payload.append({"role": "user", "content": user_msg})
+
         client = Client(host=OLLAMA_HOST, headers={"Authorization": f"Bearer {api_key}"})
         response = client.chat(
             model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg}
-            ],
-            options={"temperature": 0.1}
+            messages=messages_payload,
+            stream=False,
+            options={"temperature": 0.1} # Nhiệt độ thấp để code chính xác
         )
         
         reply = response['message']['content']
-        
-        # Lưu message assistant
-        assistant_msg = Message(session_id=session_id, role="assistant", content=reply)
-        db.session.add(assistant_msg)
-        db.session.commit()
-        
+        save_message(session_id, "assistant", reply)
         return jsonify({"response": reply})
+
     except Exception as e:
+        print(f"Chat Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
+    init_db()
     rag_engine.load_schemas()
-    app.run(host="0.0.0.0", port=10000)
-
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
