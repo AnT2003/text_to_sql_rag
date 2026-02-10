@@ -214,7 +214,7 @@ def chat():
     data = request.json
     user_msg = data.get('message')
     session_id = data.get('session_id')
-    api_key = data.get('api_key') or os.getenv("OLLAMA_API_KEY")
+    api_key = os.getenv("OLLAMA_API_KEY")
 
     if not session_id: return jsonify({"error": "Missing session_id"}), 400
 
@@ -280,3 +280,4 @@ if __name__ == '__main__':
         db.create_all()
     rag_engine.load_schemas()
     app.run(host="0.0.0.0", port=10000)
+
